@@ -902,38 +902,38 @@ export const AttendanceView: React.FC<AttendanceViewProps> = ({
         {/* Selected Event Details Strip */}
         {selectedEvent && (
           <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 text-xs animate-in fade-in duration-200">
-            <div className="flex items-center space-x-2 text-slate-700 min-w-0">
-              <Calendar className="w-4 h-4 text-[#004ACD] shrink-0" />
+            <div className="flex items-start space-x-2 text-slate-700 min-w-0">
+              <Calendar className="w-4 h-4 text-[#004ACD] shrink-0 mt-0.5" />
               <div className="min-w-0">
                 <span className="block text-[10px] text-slate-400 font-medium uppercase">Date</span>
-                <span className="font-bold truncate block">{selectedEvent.date}</span>
+                <span className="font-bold break-words block">{selectedEvent.date}</span>
               </div>
             </div>
 
-            <div className="flex items-center space-x-2 text-slate-700 min-w-0">
-              <Clock className="w-4 h-4 text-[#004ACD] shrink-0" />
+            <div className="flex items-start space-x-2 text-slate-700 min-w-0">
+              <Clock className="w-4 h-4 text-[#004ACD] shrink-0 mt-0.5" />
               <div className="min-w-0">
                 <span className="block text-[10px] text-slate-400 font-medium uppercase">Time</span>
-                <span className="font-bold truncate block">{selectedEvent.time || 'All Day'}</span>
+                <span className="font-bold break-words block">{selectedEvent.time || 'All Day'}</span>
               </div>
             </div>
 
-            <div className="flex items-center space-x-2 text-slate-700 min-w-0">
-              <MapPin className="w-4 h-4 text-[#004ACD] shrink-0" />
+            <div className="flex items-start space-x-2 text-slate-700 min-w-0">
+              <MapPin className="w-4 h-4 text-[#004ACD] shrink-0 mt-0.5" />
               <div className="min-w-0">
                 <span className="block text-[10px] text-slate-400 font-medium uppercase">Venue</span>
-                <span className="font-bold truncate block">{selectedEvent.venue}</span>
+                <span className="font-bold break-words block">{selectedEvent.venue}</span>
               </div>
             </div>
 
-            <div className="flex items-center space-x-2 text-slate-700 min-w-0">
-              <Users className="w-4 h-4 text-[#004ACD] shrink-0" />
+            <div className="flex items-start space-x-2 text-slate-700 min-w-0">
+              <Users className="w-4 h-4 text-[#004ACD] shrink-0 mt-0.5" />
               <div className="min-w-0">
                 <span className="block text-[10px] text-slate-400 font-medium uppercase">Attendance</span>
-                <span className="font-bold text-[#004ACD] block truncate">
+                <span className="font-bold text-[#004ACD] block break-words">
                   {attendanceRecords.length} / {scholars.length} ({attendancePercentage}%)
                 </span>
-                <div className="text-[10px] text-slate-500 font-medium flex gap-1.5 mt-0.5 truncate">
+                <div className="text-[10px] text-slate-500 font-medium flex flex-wrap gap-x-1.5 gap-y-0.5 mt-0.5">
                   <span className="text-emerald-700 font-bold">{signedInOnlyRecords.length} In</span>
                   <span>•</span>
                   <span className="text-cyan-700 font-bold">{signedOutRecords.length} Out</span>

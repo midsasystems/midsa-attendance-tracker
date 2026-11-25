@@ -1,6 +1,7 @@
 import React from 'react';
-import { Mail, AlertTriangle, Send, X, ShieldCheck, CheckCircle2 } from 'lucide-react';
+import { Mail, AlertTriangle, Send, X, CheckCircle2, Paperclip } from 'lucide-react';
 import { Scholar } from '../types';
+import { EmailAttachment, formatFileSize } from '../services/gmail';
 import { formatScholarName, personalizeEmailTemplate } from '../utils/formatters';
 
 interface ConfirmEmailDispatchModalProps {
@@ -11,6 +12,7 @@ interface ConfirmEmailDispatchModalProps {
   senderEmail: string;
   senderName: string;
   subject: string;
+  attachments?: EmailAttachment[];
   isSending?: boolean;
 }
 
@@ -22,6 +24,7 @@ export const ConfirmEmailDispatchModal: React.FC<ConfirmEmailDispatchModalProps>
   senderEmail,
   senderName,
   subject,
+  attachments = [],
   isSending = false,
 }) => {
   if (!isOpen) return null;
@@ -95,6 +98,32 @@ export const ConfirmEmailDispatchModal: React.FC<ConfirmEmailDispatchModalProps>
                 <CheckCircle2 className="w-3.5 h-3.5" /> Embedded QR Pass PNG
               </span>
             </div>
+            {attachments.length > 0 && (
+              <div className="pt-1.5 border-t border-slate-200/80 space-y-1">
+                <div className="flex justify-between items-center text-slate-600">
+                  <span className="font-medium flex items-center gap-1">
+                    <Paperclip className="w-3.5 h-3.5 text-[#004ACD]" />
+                    <span>Additional Files:</span>
+                  </span>
+                  <span className="font-bold text-[#004ACD]">
+                    {attachments.length} file{attachments.length > 1 ? 's' : ''} (
+                    {formatFileSize(attachments.reduce((sum, a) => sum + a.size, 0))})
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1 pt-0.5">
+                  {attachments.map((att) => (
+                    <span
+                      key={att.id}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white border border-slate-200 text-[10px] font-medium text-slate-700 max-w-[200px] truncate"
+                      title={att.name}
+                    >
+                      <span className="truncate">{att.name}</span>
+                      <span className="text-slate-400 shrink-0">({formatFileSize(att.size)})</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Recipient Preview List */}

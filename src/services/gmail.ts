@@ -1,7 +1,15 @@
 import QRCode from 'qrcode';
 import { Scholar } from '../types';
-import { getAccessToken, getCurrentUser } from './googleAuth';
+import { getAccessToken, getCurrentUser, invalidateAccessToken } from './googleAuth';
 import { formatScholarName, personalizeEmailTemplate } from '../utils/formatters';
+
+export interface EmailAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  base64Data: string;
+}
 
 export interface SendEmailOptions {
   scholar: Scholar;
@@ -9,6 +17,7 @@ export interface SendEmailOptions {
   body: string;
   senderName?: string;
   senderEmail?: string;
+  attachments?: EmailAttachment[];
 }
 
 export interface SendResult {
@@ -18,6 +27,44 @@ export interface SendResult {
   success: boolean;
   messageId?: string;
   error?: string;
+}
+
+export const MAX_TOTAL_ATTACHMENT_BYTES = 15 * 1024 * 1024; // 15 MB
+
+/**
+ * Formats byte size into a human-readable label.
+ */
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+/**
+ * Reads a browser File into an EmailAttachment with base64 data.
+ */
+export function fileToEmailAttachment(file: File): Promise<EmailAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== 'string') {
+        reject(new Error(`Failed to read file "${file.name}"`));
+        return;
+      }
+      const commaIdx = result.indexOf(',');
+      const base64Data = commaIdx >= 0 ? result.slice(commaIdx + 1) : result;
+      resolve({
+        id: `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+        name: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        size: file.size,
+        base64Data,
+      });
+    };
+    reader.onerror = () => reject(new Error(`Error reading file "${file.name}"`));
+    reader.readAsDataURL(file);
+  });
 }
 
 /**
@@ -36,16 +83,42 @@ export async function generateQrPngDataUrl(qrToken: string): Promise<string> {
 }
 
 /**
+ * Encodes a Uint8Array or ASCII/UTF-8 string into Base64 safely in chunks.
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x2000;
+  const chunks: string[] = [];
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const sub = bytes.subarray(i, i + chunkSize);
+    chunks.push(String.fromCharCode(...sub));
+  }
+  return btoa(chunks.join(''));
+}
+
+/**
+ * Encodes a UTF-8 string into standard Base64.
+ */
+function encodeUtf8Base64(str: string): string {
+  return bytesToBase64(new TextEncoder().encode(str));
+}
+
+/**
+ * Wraps base64 string into 76-character CRLF lines per RFC 2045.
+ */
+function chunkBase64(b64: string): string {
+  const clean = b64.replace(/[\r\n]/g, '');
+  const lines: string[] = [];
+  for (let i = 0; i < clean.length; i += 76) {
+    lines.push(clean.slice(i, i + 76));
+  }
+  return lines.join('\r\n');
+}
+
+/**
  * Encodes a string into Base64URL (RFC 4648 § 5) format required by Gmail API.
  */
 function encodeBase64Url(str: string): string {
-  const bytes = new TextEncoder().encode(str);
-  let binary = '';
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary)
+  return encodeUtf8Base64(str)
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '');
@@ -55,12 +128,18 @@ function encodeBase64Url(str: string): string {
  * Encodes a header value (e.g. Subject, From) using RFC 2047 MIME encoded-word syntax for full UTF-8 safety.
  */
 function encodeMimeWord(str: string): string {
-  const bytes = new TextEncoder().encode(str);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  return `=?utf-8?B?${encodeUtf8Base64(str)}?=`;
+}
+
+/**
+ * Formats a safe MIME parameter filename value.
+ */
+function formatMimeFilename(name: string): string {
+  const isPrintableAscii = /^[\x20-\x7E]+$/.test(name);
+  if (isPrintableAscii) {
+    return name.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   }
-  return `=?utf-8?B?${btoa(binary)}?=`;
+  return encodeMimeWord(name);
 }
 
 /**
@@ -159,44 +238,104 @@ function buildHtmlBody(scholar: Scholar, customBodyText: string): string {
 }
 
 /**
- * Constructs an RFC 2822 MIME message string containing HTML and an embedded PNG attachment.
+ * Constructs an RFC 2822 MIME message string containing HTML, an embedded QR PNG, and optional file attachments.
  */
 async function buildMimeMessage(options: SendEmailOptions): Promise<string> {
-  const { scholar, subject, body, senderName = 'MIDSA Attendance Office', senderEmail } = options;
+  const {
+    scholar,
+    subject,
+    body,
+    senderName = 'MIDSA Attendance Office',
+    senderEmail,
+    attachments = [],
+  } = options;
 
   // Generate QR Code PNG Base64 data
   const qrDataUrl = await generateQrPngDataUrl(scholar.qr_code);
   const qrBase64Data = qrDataUrl.replace(/^data:image\/png;base64,/, '');
 
-  const boundary = `boundary_midsa_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-  const fromHeader = senderEmail ? `"${encodeMimeWord(senderName)}" <${senderEmail}>` : encodeMimeWord(senderName);
-  const toHeader = `"${encodeMimeWord(formatScholarName(scholar))}" <${scholar.email}>`;
+  const uniqueSuffix = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const relatedBoundary = `boundary_rel_${uniqueSuffix}`;
+  const mixedBoundary = `boundary_mix_${uniqueSuffix}`;
+
+  const cleanSenderEmail = senderEmail?.trim();
+  const cleanRecipientEmail = (scholar.email || '').trim();
+  if (!cleanRecipientEmail || !cleanRecipientEmail.includes('@')) {
+    throw new Error(`Scholar ${scholar.student_id} has an invalid or missing email address.`);
+  }
+
+  const fromHeader = cleanSenderEmail
+    ? `${encodeMimeWord(senderName)} <${cleanSenderEmail}>`
+    : encodeMimeWord(senderName);
+  const toHeader = `${encodeMimeWord(formatScholarName(scholar))} <${cleanRecipientEmail}>`;
   const subjectHeader = encodeMimeWord(subject);
 
   const htmlContent = buildHtmlBody(scholar, body);
+  const htmlBase64 = chunkBase64(encodeUtf8Base64(htmlContent));
+
+  const relatedParts = [
+    `--${relatedBoundary}`,
+    `Content-Type: text/html; charset="UTF-8"`,
+    `Content-Transfer-Encoding: base64`,
+    '',
+    htmlBase64,
+    '',
+    `--${relatedBoundary}`,
+    `Content-Type: image/png; name="midsa-pass-${scholar.student_id}.png"`,
+    `Content-Transfer-Encoding: base64`,
+    `Content-Disposition: inline; filename="midsa-pass-${scholar.student_id}.png"`,
+    `Content-ID: <midsa_qr_pass>`,
+    '',
+    chunkBase64(qrBase64Data),
+    '',
+    `--${relatedBoundary}--`,
+  ];
+
+  if (!attachments || attachments.length === 0) {
+    const mimeParts = [
+      `From: ${fromHeader}`,
+      `To: ${toHeader}`,
+      `Subject: ${subjectHeader}`,
+      `MIME-Version: 1.0`,
+      `Content-Type: multipart/related; boundary="${relatedBoundary}"`,
+      '',
+      ...relatedParts,
+    ];
+    return mimeParts.join('\r\n');
+  }
+
+  const attachmentParts: string[] = [];
+  for (const att of attachments) {
+    const safeName = formatMimeFilename(att.name);
+    const rawType = (att.mimeType || 'application/octet-stream').split(';')[0].trim();
+    const mimeType = /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(rawType)
+      ? rawType
+      : 'application/octet-stream';
+    attachmentParts.push(
+      `--${mixedBoundary}`,
+      `Content-Type: ${mimeType}; name="${safeName}"`,
+      `Content-Transfer-Encoding: base64`,
+      `Content-Disposition: attachment; filename="${safeName}"`,
+      '',
+      chunkBase64(att.base64Data),
+      ''
+    );
+  }
 
   const mimeParts = [
     `From: ${fromHeader}`,
     `To: ${toHeader}`,
     `Subject: ${subjectHeader}`,
     `MIME-Version: 1.0`,
-    `Content-Type: multipart/related; boundary="${boundary}"`,
+    `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`,
     '',
-    `--${boundary}`,
-    `Content-Type: text/html; charset="UTF-8"`,
-    `Content-Transfer-Encoding: 7bit`,
+    `--${mixedBoundary}`,
+    `Content-Type: multipart/related; boundary="${relatedBoundary}"`,
     '',
-    htmlContent,
+    ...relatedParts,
     '',
-    `--${boundary}`,
-    `Content-Type: image/png; name="midsa-pass-${scholar.student_id}.png"`,
-    `Content-Transfer-Encoding: base64`,
-    `Content-Disposition: inline; filename="midsa-pass-${scholar.student_id}.png"`,
-    `Content-ID: <midsa_qr_pass>`,
-    '',
-    qrBase64Data,
-    '',
-    `--${boundary}--`,
+    ...attachmentParts,
+    `--${mixedBoundary}--`,
   ];
 
   return mimeParts.join('\r\n');
@@ -208,7 +347,13 @@ async function buildMimeMessage(options: SendEmailOptions): Promise<string> {
 export async function sendScholarEmailPass(options: SendEmailOptions): Promise<SendResult> {
   const token = await getAccessToken();
   if (!token) {
-    throw new Error('You are not signed in with Google. Please connect your Google account first to send emails.');
+    return {
+      scholarId: options.scholar.id,
+      studentId: options.scholar.student_id,
+      email: options.scholar.email,
+      success: false,
+      error: 'Google session expired or not connected. Please click "Sign in with Google" to connect your Gmail account.',
+    };
   }
 
   const user = getCurrentUser();
@@ -222,23 +367,49 @@ export async function sendScholarEmailPass(options: SendEmailOptions): Promise<S
       senderEmail: effectiveSenderEmail,
     });
 
-    const base64UrlMessage = encodeBase64Url(rawMime);
-
-    const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        raw: base64UrlMessage,
-      }),
-    });
+    // For payloads under 3 MB, use standard JSON raw endpoint; for larger attachments use Gmail media upload
+    let response: Response;
+    if (rawMime.length < 3 * 1024 * 1024) {
+      const base64UrlMessage = encodeBase64Url(rawMime);
+      response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          raw: base64UrlMessage,
+        }),
+      });
+    } else {
+      response = await fetch(
+        'https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'message/rfc822',
+          },
+          body: rawMime,
+        }
+      );
+    }
 
     if (!response.ok) {
       const errJson = await response.json().catch(() => null);
-      const errMsg = errJson?.error?.message || `Gmail API Error (${response.status})`;
-      throw new Error(errMsg);
+      const apiMsg = errJson?.error?.message || `Gmail API Error (${response.status})`;
+      if (response.status === 401) {
+        invalidateAccessToken();
+        throw new Error(
+          'Your Google authorization token expired or is invalid (401). Please click "Sign in with Google" to reconnect.'
+        );
+      }
+      if (response.status === 403) {
+        throw new Error(
+          `Gmail send permission denied (403): ${apiMsg}. Please reconnect Google and allow the "Send email on your behalf" permission.`
+        );
+      }
+      throw new Error(apiMsg);
     }
 
     const data = await response.json();
@@ -265,7 +436,7 @@ export async function sendScholarEmailPass(options: SendEmailOptions): Promise<S
  */
 export async function sendBatchScholarEmailPasses(
   scholars: Scholar[],
-  template: { subject: string; body: string; senderName?: string },
+  template: { subject: string; body: string; senderName?: string; attachments?: EmailAttachment[] },
   onProgress?: (current: number, total: number, lastResult: SendResult) => void
 ): Promise<SendResult[]> {
   const token = await getAccessToken();
@@ -289,6 +460,7 @@ export async function sendBatchScholarEmailPasses(
       body: personalizedBody,
       senderName: template.senderName,
       senderEmail: user?.email || undefined,
+      attachments: template.attachments,
     });
 
     results.push(result);

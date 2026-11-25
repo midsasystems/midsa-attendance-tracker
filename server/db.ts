@@ -1,4 +1,6 @@
-import { createClient, type Client } from '@libsql/client';
+import initSqlJs, { Database } from 'sql.js';
+import fs from 'fs';
+import path from 'path';
 import crypto from 'crypto';
 import {
   formatScholarName,
@@ -12,11 +14,9 @@ import {
   DEFAULT_MSUIIT_COLLEGES,
 } from '../src/utils/formatters';
 
-// A DbHandle looks like the old sql.js Database enough that call sites in
-// server.ts (db.run(...)) keep working unchanged, aside from adding `await`.
-export interface DbHandle extends Client {
-  run(sql: string, params?: any[]): Promise<void>;
-}
+const DB_PATH = path.join(process.cwd(), 'midsa.db');
+
+let dbInstance: Database | null = null;
 
 export function hashPassword(password: string, salt: string): string {
   return crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
@@ -38,62 +38,42 @@ export function generateSalt(): string {
   return crypto.randomBytes(16).toString('hex');
 }
 
-let dbInstance: DbHandle | null = null;
-
-export async function getDb(): Promise<DbHandle> {
+export async function getDb(): Promise<Database> {
   if (dbInstance) {
     return dbInstance;
   }
 
-  const url = process.env.TURSO_DATABASE_URL;
-  const authToken = process.env.TURSO_AUTH_TOKEN;
+  const SQL = await initSqlJs();
 
-  if (!url) {
-    throw new Error(
-      'TURSO_DATABASE_URL is not set. Create a free database at turso.tech and set ' +
-      'TURSO_DATABASE_URL / TURSO_AUTH_TOKEN as environment variables.'
-    );
+  if (fs.existsSync(DB_PATH)) {
+    try {
+      const fileBuffer = fs.readFileSync(DB_PATH);
+      dbInstance = new SQL.Database(fileBuffer);
+    } catch (e) {
+      console.error('Failed to load existing SQLite database, creating fresh one', e);
+      dbInstance = new SQL.Database();
+    }
+  } else {
+    dbInstance = new SQL.Database();
   }
 
-  const client = createClient({ url, authToken }) as DbHandle;
-
-  // Attach a `.run` convenience method so existing `db.run(sql, params)`
-  // call sites throughout server.ts keep working with just an added `await`.
-  client.run = async (sql: string, params: any[] = []) => {
-    await client.execute({ sql, args: normalizeParams(params) });
-  };
-
-  dbInstance = client;
-
-  await initSchema(dbInstance);
+  initSchema(dbInstance);
+  saveDb();
   return dbInstance;
 }
 
-// Turso persists every write immediately over the network, so there is
-// nothing to flush to disk. Kept as a no-op so existing saveDb() call sites
-// throughout server.ts don't need to be touched.
 export function saveDb(): void {
-  // no-op: Turso commits writes as they happen
+  if (!dbInstance) return;
+  try {
+    const data = dbInstance.export();
+    fs.writeFileSync(DB_PATH, Buffer.from(data));
+  } catch (err) {
+    console.error('Error saving SQLite database to disk:', err);
+  }
 }
 
-function normalizeParams(params: any[]): any[] {
-  // libSQL rejects `undefined`; sql.js silently treated it like NULL.
-  return params.map((p) => (p === undefined ? null : p));
-}
-
-export async function queryRows(db: DbHandle, sql: string, params: any[] = []): Promise<any[]> {
-  const result = await db.execute({ sql, args: normalizeParams(params) });
-  return result.rows.map((row) => {
-    const obj: Record<string, any> = {};
-    result.columns.forEach((col, i) => {
-      obj[col] = (row as any)[i];
-    });
-    return obj;
-  });
-}
-
-async function initSchema(db: DbHandle) {
-  await db.run(`
+function initSchema(db: Database) {
+  db.run(`
     CREATE TABLE IF NOT EXISTS events (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -106,7 +86,7 @@ async function initSchema(db: DbHandle) {
     );
   `);
 
-  await db.run(`
+  db.run(`
     CREATE TABLE IF NOT EXISTS scholars (
       id TEXT PRIMARY KEY,
       student_id TEXT UNIQUE NOT NULL,
@@ -130,7 +110,7 @@ async function initSchema(db: DbHandle) {
     );
   `);
 
-  await db.run(`
+  db.run(`
     CREATE TABLE IF NOT EXISTS attendance (
       id TEXT PRIMARY KEY,
       event_id TEXT NOT NULL,
@@ -149,20 +129,21 @@ async function initSchema(db: DbHandle) {
     );
   `);
 
+  // Safely apply schema migrations if table already existed without sign in / out columns
   try {
-    await db.run(`ALTER TABLE attendance ADD COLUMN sign_in_time TEXT;`);
+    db.run(`ALTER TABLE attendance ADD COLUMN sign_in_time TEXT;`);
   } catch {}
   try {
-    await db.run(`ALTER TABLE attendance ADD COLUMN sign_out_time TEXT;`);
+    db.run(`ALTER TABLE attendance ADD COLUMN sign_out_time TEXT;`);
   } catch {}
   try {
-    await db.run(`ALTER TABLE attendance ADD COLUMN sign_out_method TEXT;`);
+    db.run(`ALTER TABLE attendance ADD COLUMN sign_out_method TEXT;`);
   } catch {}
   try {
-    await db.run(`UPDATE attendance SET sign_in_time = timestamp WHERE sign_in_time IS NULL;`);
+    db.run(`UPDATE attendance SET sign_in_time = timestamp WHERE sign_in_time IS NULL;`);
   } catch {}
 
-  await db.run(`
+  db.run(`
     CREATE TABLE IF NOT EXISTS email_templates (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -172,7 +153,7 @@ async function initSchema(db: DbHandle) {
     );
   `);
 
-  await db.run(`
+  db.run(`
     CREATE TABLE IF NOT EXISTS email_campaigns (
       id TEXT PRIMARY KEY,
       subject TEXT NOT NULL,
@@ -183,7 +164,15 @@ async function initSchema(db: DbHandle) {
     );
   `);
 
-  await db.run(`
+  db.run(`
+    CREATE TABLE IF NOT EXISTS colleges (
+      id TEXT PRIMARY KEY,
+      name TEXT UNIQUE NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+
+  db.run(`
     CREATE TABLE IF NOT EXISTS admin_auth (
       id TEXT PRIMARY KEY,
       username TEXT UNIQUE NOT NULL,
@@ -195,7 +184,7 @@ async function initSchema(db: DbHandle) {
     );
   `);
 
-  await db.run(`
+  db.run(`
     CREATE TABLE IF NOT EXISTS admin_sessions (
       token TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -207,11 +196,11 @@ async function initSchema(db: DbHandle) {
 
   // Seed default MIDSA Admin credentials if none exists
   try {
-    const adminCheck = await queryRows(db, 'SELECT * FROM admin_auth LIMIT 1;');
+    const adminCheck = queryRows(db, 'SELECT * FROM admin_auth LIMIT 1;');
     if (adminCheck.length === 0) {
       const defaultSalt = generateSalt();
       const defaultHash = hashPassword('kenjigwapo', defaultSalt);
-      await db.run(
+      db.run(
         `INSERT INTO admin_auth (id, username, password_hash, salt, display_name, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?);`,
         [
@@ -229,19 +218,12 @@ async function initSchema(db: DbHandle) {
     console.error('Error seeding admin credentials:', err);
   }
 
-  await db.run(`
-    CREATE TABLE IF NOT EXISTS colleges (
-      id TEXT PRIMARY KEY,
-      name TEXT UNIQUE NOT NULL,
-      created_at TEXT NOT NULL
-    );
-  `);
-
+  // Seed official MSU-IIT colleges alphabetically if missing
   for (let i = 0; i < DEFAULT_MSUIIT_COLLEGES.length; i++) {
     const colName = DEFAULT_MSUIIT_COLLEGES[i];
-    const existingCol = await queryRows(db, 'SELECT id FROM colleges WHERE LOWER(name) = LOWER(?);', [colName]);
+    const existingCol = queryRows(db, 'SELECT id FROM colleges WHERE LOWER(name) = LOWER(?);', [colName]);
     if (existingCol.length === 0) {
-      await db.run('INSERT INTO colleges (id, name, created_at) VALUES (?, ?, ?);', [
+      db.run('INSERT INTO colleges (id, name, created_at) VALUES (?, ?, ?);', [
         `col-${String(i + 1).padStart(2, '0')}`,
         colName,
         new Date().toISOString(),
@@ -249,10 +231,11 @@ async function initSchema(db: DbHandle) {
     }
   }
 
-  const templateCountRows = await queryRows(db, 'SELECT COUNT(*) as cnt FROM email_templates;');
-  const templateCount = Number(templateCountRows[0]?.cnt || 0);
+  // Seed default email templates if none exist
+  const templateCheck = db.exec("SELECT COUNT(*) as cnt FROM email_templates;");
+  const templateCount = templateCheck[0]?.values[0]?.[0] as number;
   if (templateCount === 0) {
-    await db.run(
+    db.run(
       `INSERT INTO email_templates (id, name, subject, body, created_at)
        VALUES (?, ?, ?, ?, ?)`,
       [
@@ -264,7 +247,7 @@ async function initSchema(db: DbHandle) {
       ]
     );
 
-    await db.run(
+    db.run(
       `INSERT INTO email_templates (id, name, subject, body, created_at)
        VALUES (?, ?, ?, ?, ?)`,
       [
@@ -277,63 +260,67 @@ async function initSchema(db: DbHandle) {
     );
   }
 
-  const eventCountRows = await queryRows(db, 'SELECT COUNT(*) as cnt FROM events;');
-  const count = Number(eventCountRows[0]?.cnt || 0);
+  // Check if events table is empty, seed initial records
+  const eventCheck = db.exec("SELECT COUNT(*) as cnt FROM events;");
+  const count = eventCheck[0]?.values[0]?.[0] as number;
 
   if (count === 0) {
-    await seedInitialData(db);
+    seedInitialData(db);
   }
 
+  // Ensure scholars table has granular columns and scholarship columns
   try {
-    const tableInfo = await queryRows(db, 'PRAGMA table_info(scholars);');
+    const tableInfo = queryRows(db, 'PRAGMA table_info(scholars);');
     const colNames = tableInfo.map((c: any) => c.name);
     if (!colNames.includes('last_name')) {
-      await db.run('ALTER TABLE scholars ADD COLUMN last_name TEXT;');
+      db.run('ALTER TABLE scholars ADD COLUMN last_name TEXT;');
     }
     if (!colNames.includes('first_name')) {
-      await db.run('ALTER TABLE scholars ADD COLUMN first_name TEXT;');
+      db.run('ALTER TABLE scholars ADD COLUMN first_name TEXT;');
     }
     if (!colNames.includes('middle_initial')) {
-      await db.run('ALTER TABLE scholars ADD COLUMN middle_initial TEXT;');
+      db.run('ALTER TABLE scholars ADD COLUMN middle_initial TEXT;');
     }
     if (!colNames.includes('year_level')) {
-      await db.run('ALTER TABLE scholars ADD COLUMN year_level TEXT;');
+      db.run('ALTER TABLE scholars ADD COLUMN year_level TEXT;');
     }
     if (!colNames.includes('academic_program')) {
-      await db.run('ALTER TABLE scholars ADD COLUMN academic_program TEXT;');
+      db.run('ALTER TABLE scholars ADD COLUMN academic_program TEXT;');
     }
     if (!colNames.includes('scholarship_category')) {
-      await db.run("ALTER TABLE scholars ADD COLUMN scholarship_category TEXT DEFAULT 'UGS';");
+      db.run("ALTER TABLE scholars ADD COLUMN scholarship_category TEXT DEFAULT 'UGS';");
     }
     if (!colNames.includes('scholarship_subcategory')) {
-      await db.run("ALTER TABLE scholars ADD COLUMN scholarship_subcategory TEXT DEFAULT 'RA 7687';");
+      db.run("ALTER TABLE scholars ADD COLUMN scholarship_subcategory TEXT DEFAULT 'RA 7687';");
     }
     if (!colNames.includes('scholarship_type')) {
-      await db.run("ALTER TABLE scholars ADD COLUMN scholarship_type TEXT DEFAULT 'RA 7687';");
+      db.run("ALTER TABLE scholars ADD COLUMN scholarship_type TEXT DEFAULT 'RA 7687';");
     }
     if (!colNames.includes('gawad_isko_awardee')) {
-      await db.run("ALTER TABLE scholars ADD COLUMN gawad_isko_awardee TEXT DEFAULT 'no';");
+      db.run("ALTER TABLE scholars ADD COLUMN gawad_isko_awardee TEXT DEFAULT 'no';");
     }
     if (!colNames.includes('gawad_isko_certificate_claimed')) {
-      await db.run("ALTER TABLE scholars ADD COLUMN gawad_isko_certificate_claimed TEXT DEFAULT 'no';");
+      db.run("ALTER TABLE scholars ADD COLUMN gawad_isko_certificate_claimed TEXT DEFAULT 'no';");
     }
     if (!colNames.includes('gawad_isko_certificate_received_at')) {
-      await db.run('ALTER TABLE scholars ADD COLUMN gawad_isko_certificate_received_at TEXT;');
+      db.run('ALTER TABLE scholars ADD COLUMN gawad_isko_certificate_received_at TEXT;');
     }
   } catch (err) {
     console.error('Column migration error:', err);
   }
 
+  // Ensure no dummy pre-seeded students exist by default
   try {
-    await db.run("DELETE FROM attendance WHERE scholar_id LIKE 'sch-00%' OR scholar_id = 'sch-000';");
-    await db.run("DELETE FROM scholars WHERE id LIKE 'sch-00%' OR id = 'sch-000';");
+    db.run("DELETE FROM attendance WHERE scholar_id LIKE 'sch-00%' OR scholar_id = 'sch-000';");
+    db.run("DELETE FROM scholars WHERE id LIKE 'sch-00%' OR id = 'sch-000';");
   } catch (err) {
     // ignore
   }
 
+  // Ensure all existing scholars and attendance records follow XXXX-XXXX format, granular name format, and scholarship types
   try {
-    const scholarsList = await queryRows(db, 'SELECT id, student_id, qr_code, name, last_name, first_name, middle_initial, year_level, academic_program, year_program, college, scholarship_category, scholarship_subcategory, scholarship_type, email FROM scholars');
-
+    const scholarsList = queryRows(db, 'SELECT id, student_id, qr_code, name, last_name, first_name, middle_initial, year_level, academic_program, year_program, college, scholarship_category, scholarship_subcategory, scholarship_type, email FROM scholars');
+    let hasChanges = false;
     for (const s of scholarsList) {
       const sId = String(s.student_id || '');
       let updatedStudentId = sId;
@@ -348,15 +335,18 @@ async function initSchema(db: DbHandle) {
           updatedStudentId = `${digits.substring(0, 4)}-${digits.substring(4, 8)}`;
         }
         updatedQr = `MIDSA-SCHOLAR-${updatedStudentId}-MIG`;
-        await db.run('UPDATE attendance SET student_id = ? WHERE scholar_id = ?', [updatedStudentId, s.id]);
+        db.run('UPDATE attendance SET student_id = ? WHERE scholar_id = ?', [updatedStudentId, s.id]);
+        hasChanges = true;
       }
 
+      // Populate separate name fields and normalize name to "Last Name, First Name M.I."
       let lastName = s.last_name;
       let firstName = s.first_name;
       let middleInitial = s.middle_initial;
       let formattedName = s.name;
       let email = s.email;
 
+      // Restore scholars that were mistakenly overwritten with 'Cruz, Mateo Gabriel L.'
       if (
         (s.student_id === '2024-0006' || s.student_id === '2024-0955' || s.student_id === '2025-0919') &&
         (lastName === 'Cruz' || formattedName.includes('Mateo Gabriel') || email === 'mateo.cruz@midsa.org')
@@ -366,6 +356,7 @@ async function initSchema(db: DbHandle) {
         middleInitial = 'C.';
         formattedName = 'Gloria, Kenneth Jerome C.';
         email = 'kennethjerome.gloria@g.msuiit.edu.ph';
+        hasChanges = true;
       } else if (!lastName || !firstName) {
         const parsed = parseScholarName(s.name);
         lastName = parsed.lastName;
@@ -376,6 +367,7 @@ async function initSchema(db: DbHandle) {
           first_name: firstName,
           middle_initial: middleInitial,
         });
+        hasChanges = true;
       } else {
         formattedName = formatScholarName({
           last_name: lastName,
@@ -384,6 +376,7 @@ async function initSchema(db: DbHandle) {
         });
       }
 
+      // Clean academic program string - sorted longest first so specific sub-majors match first
       const knownPrograms = [
         'BS Biology (Biodiversity)',
         'BS Biology (Microbiology)',
@@ -419,6 +412,7 @@ async function initSchema(db: DbHandle) {
 
       let cleanProg = (s.academic_program || s.year_program || '').trim();
 
+      // Explicitly restore BS Biology (Biodiversity) for scholars whose program was truncated to 'BS Biology'
       const biodiversityStudentIds = new Set([
         '2023-0343',
         '2023-0372',
@@ -458,10 +452,12 @@ async function initSchema(db: DbHandle) {
         }
       }
 
+      // Deduce Year Level: If 2023 -> 4, 2024 -> 3, 2025 -> 2, 2026 -> 1
       let yearLevel = normalizeYearLevel(s.year_level, s.student_id);
       const academicProgram = cleanAcademicProgram(cleanProg);
       const formattedYearProgram = formatYearProgram(yearLevel, academicProgram, s.student_id);
 
+      // Populate scholarship_category, scholarship_subcategory, scholarship_type
       let scholarshipCategory = s.scholarship_category;
       let scholarshipSubcategory = s.scholarship_subcategory;
       let scholarshipType = s.scholarship_type;
@@ -492,24 +488,31 @@ async function initSchema(db: DbHandle) {
           scholarshipSubcategory = scholarshipSubcategory || 'RA 7687';
           scholarshipType = formatScholarshipType(scholarshipCategory, scholarshipSubcategory);
         }
+        hasChanges = true;
       } else {
         scholarshipType = formatScholarshipType(scholarshipCategory, scholarshipSubcategory);
       }
 
+      // Migrate legacy college name to official MSU-IIT college
       let college = s.college;
       if (college === 'College of Information and Communications Technology') {
         college = 'College of Computer Studies';
+        hasChanges = true;
       } else if (college === 'College of Engineering and Architecture') {
         college = 'College of Engineering';
+        hasChanges = true;
       } else if (college === 'College of Business and Accountancy') {
         college = 'College of Economics, Business, and Accountancy';
+        hasChanges = true;
       } else if (college === 'College of Arts and Humanities') {
         college = 'College of Arts and Social Sciences';
+        hasChanges = true;
       } else if (college === 'College of Nursing and Allied Health Sciences') {
         college = 'College of Health Sciences';
+        hasChanges = true;
       }
 
-      await db.run(
+      db.run(
         `UPDATE scholars
          SET student_id = ?, qr_code = ?, name = ?, last_name = ?, first_name = ?, middle_initial = ?, year_level = ?, academic_program = ?, year_program = ?, college = ?, scholarship_category = ?, scholarship_subcategory = ?, scholarship_type = ?, email = ?
          WHERE id = ?`,
@@ -517,18 +520,21 @@ async function initSchema(db: DbHandle) {
       );
     }
 
-    await db.run(`
+    // Always synchronize attendance table's student_id with current scholars student_id
+    db.run(`
       UPDATE attendance
       SET student_id = (SELECT student_id FROM scholars WHERE scholars.id = attendance.scholar_id)
       WHERE EXISTS (SELECT 1 FROM scholars WHERE scholars.id = attendance.scholar_id);
     `);
+
+    saveDb();
   } catch (err) {
     console.error('Migration error:', err);
   }
 }
 
-async function seedInitialData(db: DbHandle) {
-  console.log('Seeding initial MIDSA event records into Turso...');
+function seedInitialData(db: Database) {
+  console.log('Seeding initial MIDSA event records into SQLite...');
 
   const initialEvents = [
     {
@@ -564,10 +570,23 @@ async function seedInitialData(db: DbHandle) {
   ];
 
   for (const evt of initialEvents) {
-    await db.run(
+    db.run(
       `INSERT INTO events (id, name, date, time, venue, description, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [evt.id, evt.name, evt.date, evt.time, evt.venue, evt.description, evt.status, evt.created_at]
     );
   }
+}
+
+export function queryRows(db: Database, sql: string, params: any[] = []): any[] {
+  const stmt = db.prepare(sql);
+  if (params && params.length > 0) {
+    stmt.bind(params);
+  }
+  const results: any[] = [];
+  while (stmt.step()) {
+    results.push(stmt.getAsObject());
+  }
+  stmt.free();
+  return results;
 }

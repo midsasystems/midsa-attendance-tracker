@@ -132,6 +132,17 @@ export const getAccessToken = async (): Promise<string | null> => {
 };
 
 /**
+ * Clears an expired or rejected in-memory access token and notifies listeners
+ * so the UI prompts the user to reconnect their Google account.
+ */
+export const invalidateAccessToken = (): void => {
+  if (cachedAccessToken !== null) {
+    cachedAccessToken = null;
+    notifyListeners();
+  }
+};
+
+/**
  * Retrieves the currently active user profile.
  */
 export const getCurrentUser = (): User | null => {

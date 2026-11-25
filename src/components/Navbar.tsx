@@ -1,6 +1,6 @@
 import React from 'react';
 import type { TabType, AdminUser } from '../types';
-import { LayoutDashboard, Calendar, Users, QrCode, Settings, ShieldCheck } from 'lucide-react';
+import { LayoutDashboard, Calendar, Users, QrCode, Settings } from 'lucide-react';
 import midsaLogo from '../assets/midsa-logo.png';
 import { GoogleAuthButton } from './GoogleAuthButton';
 
@@ -18,7 +18,6 @@ export const Navbar: React.FC<NavbarProps> = ({
   onSelectTab,
   totalEventsCount,
   totalScholarsCount,
-  adminUser,
 }) => {
   const tabs = [
     {
@@ -72,15 +71,9 @@ export const Navbar: React.FC<NavbarProps> = ({
               />
             </div>
             <div>
-              <div className="flex items-center space-x-2">
-                <span className="font-extrabold text-xl sm:text-2xl tracking-tight text-white leading-tight">
-                  MIDSA
-                </span>
-                <span className="hidden xl:inline-flex items-center space-x-1 px-2 py-0.5 rounded-full bg-white/15 text-[10px] font-bold text-white border border-white/20">
-                  <ShieldCheck className="w-3 h-3 text-[#00F7FF]" />
-                  <span>{adminUser?.displayName || 'MIDSA Admin'}</span>
-                </span>
-              </div>
+              <span className="font-extrabold text-xl sm:text-2xl tracking-tight text-white leading-tight block">
+                MIDSA
+              </span>
               <p className="text-[11px] text-blue-100/90 font-medium hidden sm:block tracking-wide">
                 MSU-IIT DOST-SEI Scholars' Association
               </p>

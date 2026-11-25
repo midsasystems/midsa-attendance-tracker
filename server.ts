@@ -17,7 +17,7 @@ import {
 
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  const PORT = 3000;
 
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -26,12 +26,12 @@ async function startServer() {
   const db = await getDb();
 
   // 1. Health check
-  app.get('/api/health', async (req, res) => {
+  app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', time: new Date().toISOString() });
   });
 
   // --- AUTHENTICATION ENDPOINTS ---
-  app.post('/api/auth/login', async (req, res) => {
+  app.post('/api/auth/login', (req, res) => {
     try {
       const { username, password } = req.body;
       if (!username || !password) {
@@ -39,7 +39,7 @@ async function startServer() {
       }
 
       const cleanUser = String(username).trim();
-      const rows = await queryRows(db, 'SELECT * FROM admin_auth WHERE LOWER(username) = LOWER(?);', [cleanUser]);
+      const rows = queryRows(db, 'SELECT * FROM admin_auth WHERE LOWER(username) = LOWER(?);', [cleanUser]);
       if (rows.length === 0) {
         return res.status(401).json({ error: 'Invalid username or password' });
       }
@@ -55,7 +55,7 @@ async function startServer() {
       const createdAt = new Date().toISOString();
       const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
-      await db.run(
+      db.run(
         `INSERT INTO admin_sessions (token, user_id, username, created_at, expires_at)
          VALUES (?, ?, ?, ?, ?)`,
         [sessionToken, admin.id, admin.username, createdAt, expiresAt]
@@ -77,19 +77,19 @@ async function startServer() {
     }
   });
 
-  app.get('/api/auth/session', async (req, res) => {
+  app.get('/api/auth/session', (req, res) => {
     try {
       const authHeader = req.headers.authorization;
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return res.status(401).json({ authenticated: false, error: 'No active session token provided' });
       }
       const token = authHeader.split(' ')[1];
-      const sessionRows = await queryRows(db, 'SELECT * FROM admin_sessions WHERE token = ?', [token]);
+      const sessionRows = queryRows(db, 'SELECT * FROM admin_sessions WHERE token = ?', [token]);
       if (sessionRows.length === 0) {
         return res.status(401).json({ authenticated: false, error: 'Session expired or invalid' });
       }
       const session = sessionRows[0];
-      const adminRows = await queryRows(db, 'SELECT id, username, display_name FROM admin_auth WHERE id = ?', [session.user_id]);
+      const adminRows = queryRows(db, 'SELECT id, username, display_name FROM admin_auth WHERE id = ?', [session.user_id]);
       const admin = adminRows[0] || { id: session.user_id, username: session.username, display_name: 'MIDSA Admin' };
 
       res.json({
@@ -105,12 +105,12 @@ async function startServer() {
     }
   });
 
-  app.post('/api/auth/logout', async (req, res) => {
+  app.post('/api/auth/logout', (req, res) => {
     try {
       const authHeader = req.headers.authorization;
       if (authHeader && authHeader.startsWith('Bearer ')) {
         const token = authHeader.split(' ')[1];
-        await db.run('DELETE FROM admin_sessions WHERE token = ?', [token]);
+        db.run('DELETE FROM admin_sessions WHERE token = ?', [token]);
         saveDb();
       }
       res.json({ success: true, message: 'Logged out successfully' });
@@ -119,14 +119,14 @@ async function startServer() {
     }
   });
 
-  app.post('/api/auth/change-account', async (req, res) => {
+  app.post('/api/auth/change-account', (req, res) => {
     try {
       const authHeader = req.headers.authorization;
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return res.status(401).json({ error: 'Unauthorized: Session required' });
       }
       const token = authHeader.split(' ')[1];
-      const sessionRows = await queryRows(db, 'SELECT * FROM admin_sessions WHERE token = ?', [token]);
+      const sessionRows = queryRows(db, 'SELECT * FROM admin_sessions WHERE token = ?', [token]);
       if (sessionRows.length === 0) {
         return res.status(401).json({ error: 'Session expired or invalid' });
       }
@@ -137,7 +137,7 @@ async function startServer() {
         return res.status(400).json({ error: 'Old password is required to change account details' });
       }
 
-      const adminRows = await queryRows(db, 'SELECT * FROM admin_auth WHERE id = ?', [session.user_id]);
+      const adminRows = queryRows(db, 'SELECT * FROM admin_auth WHERE id = ?', [session.user_id]);
       if (adminRows.length === 0) {
         return res.status(404).json({ error: 'Admin account not found' });
       }
@@ -160,7 +160,7 @@ async function startServer() {
           return res.status(400).json({ error: 'Username must be at least 3 characters long' });
         }
         // Check if username conflict
-        const checkConflict = await queryRows(db, 'SELECT id FROM admin_auth WHERE LOWER(username) = LOWER(?) AND id != ?', [cleanNewUser, admin.id]);
+        const checkConflict = queryRows(db, 'SELECT id FROM admin_auth WHERE LOWER(username) = LOWER(?) AND id != ?', [cleanNewUser, admin.id]);
         if (checkConflict.length > 0) {
           return res.status(409).json({ error: 'Username already in use. Please select a different username.' });
         }
@@ -181,7 +181,7 @@ async function startServer() {
       }
 
       const now = new Date().toISOString();
-      await db.run(
+      db.run(
         `UPDATE admin_auth
          SET username = ?, password_hash = ?, salt = ?, updated_at = ?
          WHERE id = ?`,
@@ -189,7 +189,7 @@ async function startServer() {
       );
 
       // Keep active session usernames synced
-      await db.run('UPDATE admin_sessions SET username = ? WHERE user_id = ?', [updatedUsername, admin.id]);
+      db.run('UPDATE admin_sessions SET username = ? WHERE user_id = ?', [updatedUsername, admin.id]);
       saveDb();
 
       res.json({
@@ -208,7 +208,7 @@ async function startServer() {
   });
 
   // --- API SECURITY MIDDLEWARE (Protects all other /api routes) ---
-  app.use('/api', async (req, res, next) => {
+  app.use('/api', (req, res, next) => {
     // Whitelist public endpoints
     if (
       req.path === '/health' ||
@@ -235,7 +235,7 @@ async function startServer() {
       });
     }
 
-    const sessionRows = await queryRows(db, 'SELECT * FROM admin_sessions WHERE token = ?', [token]);
+    const sessionRows = queryRows(db, 'SELECT * FROM admin_sessions WHERE token = ?', [token]);
     if (sessionRows.length === 0) {
       return res.status(401).json({
         error: 'Unauthorized: Session expired or invalid. Please log in again.',
@@ -262,7 +262,7 @@ async function startServer() {
   }
 
   // Real-Time Server-Sent Events (SSE) stream for instant auto-sync across all devices
-  app.get('/api/realtime/stream', async (req, res) => {
+  app.get('/api/realtime/stream', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
@@ -291,9 +291,9 @@ async function startServer() {
   });
 
   // Colleges Endpoints (MSU-IIT Colleges)
-  app.get('/api/colleges', async (req, res) => {
+  app.get('/api/colleges', (req, res) => {
     try {
-      const rows = await queryRows(db, 'SELECT name FROM colleges ORDER BY name ASC;');
+      const rows = queryRows(db, 'SELECT name FROM colleges ORDER BY name ASC;');
       const list = rows.map((r: any) => r.name);
       res.json(list);
     } catch (err: any) {
@@ -302,23 +302,23 @@ async function startServer() {
     }
   });
 
-  app.post('/api/colleges', async (req, res) => {
+  app.post('/api/colleges', (req, res) => {
     try {
       const { name } = req.body;
       if (!name || !name.trim()) {
         return res.status(400).json({ error: 'College name is required' });
       }
       const cleanName = name.trim();
-      const existing = await queryRows(db, 'SELECT name FROM colleges WHERE LOWER(name) = LOWER(?);', [cleanName]);
+      const existing = queryRows(db, 'SELECT name FROM colleges WHERE LOWER(name) = LOWER(?);', [cleanName]);
       if (existing.length > 0) {
-        const rows = await queryRows(db, 'SELECT name FROM colleges ORDER BY name ASC;');
+        const rows = queryRows(db, 'SELECT name FROM colleges ORDER BY name ASC;');
         return res.json({ success: true, college: existing[0].name, colleges: rows.map((r: any) => r.name) });
       }
       const id = 'col-' + Date.now().toString(36);
-      await db.run('INSERT INTO colleges (id, name, created_at) VALUES (?, ?, ?);', [id, cleanName, new Date().toISOString()]);
+      db.run('INSERT INTO colleges (id, name, created_at) VALUES (?, ?, ?);', [id, cleanName, new Date().toISOString()]);
       saveDb();
 
-      const rows = await queryRows(db, 'SELECT name FROM colleges ORDER BY name ASC;');
+      const rows = queryRows(db, 'SELECT name FROM colleges ORDER BY name ASC;');
       res.status(201).json({ success: true, college: cleanName, colleges: rows.map((r: any) => r.name) });
     } catch (err: any) {
       console.error('Error adding college:', err);
@@ -327,22 +327,22 @@ async function startServer() {
   });
 
   // 2. Dashboard Statistics
-  app.get('/api/dashboard/stats', async (req, res) => {
+  app.get('/api/dashboard/stats', (req, res) => {
     try {
-      const scholarCntRows = await queryRows(db, 'SELECT COUNT(*) as count FROM scholars;');
+      const scholarCntRows = queryRows(db, 'SELECT COUNT(*) as count FROM scholars;');
       const totalScholars = Number(scholarCntRows[0]?.count || 0);
 
-      const eventCntRows = await queryRows(db, 'SELECT COUNT(*) as count FROM events;');
+      const eventCntRows = queryRows(db, 'SELECT COUNT(*) as count FROM events;');
       const totalEvents = Number(eventCntRows[0]?.count || 0);
 
-      const activeEventRows = await queryRows(db, "SELECT COUNT(*) as count FROM events WHERE status = 'ongoing' OR status = 'upcoming';");
+      const activeEventRows = queryRows(db, "SELECT COUNT(*) as count FROM events WHERE status = 'ongoing' OR status = 'upcoming';");
       const activeEvents = Number(activeEventRows[0]?.count || 0);
 
-      const attCntRows = await queryRows(db, 'SELECT COUNT(*) as count FROM attendance;');
+      const attCntRows = queryRows(db, 'SELECT COUNT(*) as count FROM attendance;');
       const totalAttendance = Number(attCntRows[0]?.count || 0);
 
       // Recent attendance logs sorted by latest action (sign_out_time, sign_in_time, or timestamp)
-      const recentAttendance = await queryRows(
+      const recentAttendance = queryRows(
         db,
         `SELECT a.id, a.event_id, a.scholar_id, s.student_id as student_id, a.timestamp,
                 COALESCE(a.sign_in_time, a.timestamp) as sign_in_time, a.sign_out_time, a.status,
@@ -357,7 +357,7 @@ async function startServer() {
       );
 
       // Event breakdown statistics
-      const eventBreakdown = await queryRows(
+      const eventBreakdown = queryRows(
         db,
         `SELECT e.id, e.name, e.date, e.time, e.venue, e.status,
                 COUNT(a.id) as attendance_count
@@ -390,9 +390,9 @@ async function startServer() {
   });
 
   // 3. Events Endpoints
-  app.get('/api/events', async (req, res) => {
+  app.get('/api/events', (req, res) => {
     try {
-      const events = await queryRows(
+      const events = queryRows(
         db,
         `SELECT e.*, COUNT(a.id) as attendee_count
          FROM events e
@@ -406,7 +406,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/events', async (req, res) => {
+  app.post('/api/events', (req, res) => {
     try {
       const { name, date, time, venue, description, status } = req.body;
       if (!name || !date || !venue) {
@@ -416,14 +416,14 @@ async function startServer() {
       const id = 'evt-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 6);
       const createdAt = new Date().toISOString();
 
-      await db.run(
+      db.run(
         `INSERT INTO events (id, name, date, time, venue, description, status, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, name.trim(), date, (time || '').trim(), venue.trim(), (description || '').trim(), status || 'upcoming', createdAt]
       );
       saveDb();
       broadcastChange('events', { id });
-      const created = (await queryRows(db, 'SELECT * FROM events WHERE id = ?', [id]))[0];
+      const created = queryRows(db, 'SELECT * FROM events WHERE id = ?', [id])[0];
       res.status(201).json(created);
     } catch (err: any) {
       console.error('Error creating event:', err);
@@ -431,10 +431,10 @@ async function startServer() {
     }
   });
 
-  app.put('/api/events/:id', async (req, res) => {
+  app.put('/api/events/:id', (req, res) => {
     try {
       const { id } = req.params;
-      const existingRows = await queryRows(db, 'SELECT * FROM events WHERE id = ?', [id]);
+      const existingRows = queryRows(db, 'SELECT * FROM events WHERE id = ?', [id]);
       if (existingRows.length === 0) {
         return res.status(404).json({ error: 'Event not found' });
       }
@@ -446,7 +446,7 @@ async function startServer() {
       const description = req.body.description !== undefined ? String(req.body.description).trim() : (existing.description || '');
       const status = req.body.status !== undefined ? String(req.body.status).trim().toLowerCase() : existing.status;
 
-      await db.run(
+      db.run(
         `UPDATE events
          SET name = ?, date = ?, time = ?, venue = ?, description = ?, status = ?
          WHERE id = ?`,
@@ -455,17 +455,17 @@ async function startServer() {
       saveDb();
       broadcastChange('events', { id });
 
-      const updated = (await queryRows(db, 'SELECT * FROM events WHERE id = ?', [id]))[0];
+      const updated = queryRows(db, 'SELECT * FROM events WHERE id = ?', [id])[0];
       res.json(updated);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.patch('/api/events/:id', async (req, res) => {
+  app.patch('/api/events/:id', (req, res) => {
     try {
       const { id } = req.params;
-      const existingRows = await queryRows(db, 'SELECT * FROM events WHERE id = ?', [id]);
+      const existingRows = queryRows(db, 'SELECT * FROM events WHERE id = ?', [id]);
       if (existingRows.length === 0) {
         return res.status(404).json({ error: 'Event not found' });
       }
@@ -477,7 +477,7 @@ async function startServer() {
       const description = req.body.description !== undefined ? String(req.body.description).trim() : (existing.description || '');
       const status = req.body.status !== undefined ? String(req.body.status).trim().toLowerCase() : existing.status;
 
-      await db.run(
+      db.run(
         `UPDATE events
          SET name = ?, date = ?, time = ?, venue = ?, description = ?, status = ?
          WHERE id = ?`,
@@ -486,35 +486,35 @@ async function startServer() {
       saveDb();
       broadcastChange('events', { id });
 
-      const updated = (await queryRows(db, 'SELECT * FROM events WHERE id = ?', [id]))[0];
+      const updated = queryRows(db, 'SELECT * FROM events WHERE id = ?', [id])[0];
       res.json(updated);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.patch('/api/events/:id/status', async (req, res) => {
+  app.patch('/api/events/:id/status', (req, res) => {
     try {
       const { id } = req.params;
       const { status } = req.body;
       if (!status) {
         return res.status(400).json({ error: 'Status is required' });
       }
-      await db.run('UPDATE events SET status = ? WHERE id = ?', [String(status).trim().toLowerCase(), id]);
+      db.run('UPDATE events SET status = ? WHERE id = ?', [String(status).trim().toLowerCase(), id]);
       saveDb();
       broadcastChange('events', { id });
-      const updated = (await queryRows(db, 'SELECT * FROM events WHERE id = ?', [id]))[0];
+      const updated = queryRows(db, 'SELECT * FROM events WHERE id = ?', [id])[0];
       res.json(updated);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.delete('/api/events/:id', async (req, res) => {
+  app.delete('/api/events/:id', (req, res) => {
     try {
       const { id } = req.params;
-      await db.run('DELETE FROM attendance WHERE event_id = ?', [id]);
-      await db.run('DELETE FROM events WHERE id = ?', [id]);
+      db.run('DELETE FROM attendance WHERE event_id = ?', [id]);
+      db.run('DELETE FROM events WHERE id = ?', [id]);
       saveDb();
       broadcastChange('events', { id });
       res.json({ success: true, message: 'Event and related attendance deleted' });
@@ -524,9 +524,9 @@ async function startServer() {
   });
 
   // 4. Scholars Endpoints
-  app.get('/api/scholars', async (req, res) => {
+  app.get('/api/scholars', (req, res) => {
     try {
-      const scholars = await queryRows(
+      const scholars = queryRows(
         db,
         `SELECT s.*, COUNT(a.id) as attendance_count
          FROM scholars s
@@ -552,7 +552,7 @@ async function startServer() {
     return /^\d{4}-\d{4}$/.test(studentId.trim());
   }
 
-  app.post('/api/scholars', async (req, res) => {
+  app.post('/api/scholars', (req, res) => {
     try {
       const {
         student_id,
@@ -639,7 +639,7 @@ async function startServer() {
       }
 
       // Check if student_id already exists
-      const existing = await queryRows(db, 'SELECT * FROM scholars WHERE student_id = ?', [formattedStudentId]);
+      const existing = queryRows(db, 'SELECT * FROM scholars WHERE student_id = ?', [formattedStudentId]);
       if (existing.length > 0) {
         return res.status(409).json({ error: `Scholar with Student ID ${formattedStudentId} already exists.` });
       }
@@ -653,7 +653,7 @@ async function startServer() {
       const cleanClaimed = String(rawClaimed || '').trim().toLowerCase() === 'yes' || rawClaimed === true ? 'yes' : 'no';
       const certReceivedAt = cleanClaimed === 'yes' ? new Date().toISOString() : null;
 
-      await db.run(
+      db.run(
         `INSERT INTO scholars (id, student_id, name, last_name, first_name, middle_initial, year_level, academic_program, year_program, college, scholarship_category, scholarship_subcategory, scholarship_type, email, qr_code, gawad_isko_awardee, gawad_isko_certificate_claimed, gawad_isko_certificate_received_at, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
@@ -681,7 +681,7 @@ async function startServer() {
       saveDb();
       broadcastChange('scholars', { id });
 
-      const created = (await queryRows(db, 'SELECT * FROM scholars WHERE id = ?', [id]))[0];
+      const created = queryRows(db, 'SELECT * FROM scholars WHERE id = ?', [id])[0];
       res.status(201).json(created);
     } catch (err: any) {
       console.error('Error registering scholar:', err);
@@ -690,7 +690,7 @@ async function startServer() {
   });
 
   // Batch CSV Registration
-  app.post('/api/scholars/batch', async (req, res) => {
+  app.post('/api/scholars/batch', (req, res) => {
     try {
       const { scholars: list } = req.body;
       if (!Array.isArray(list) || list.length === 0) {
@@ -700,12 +700,6 @@ async function startServer() {
       let addedCount = 0;
       let skippedCount = 0;
       const errors: string[] = [];
-
-      // One round-trip for all existing IDs; duplicate checks happen in memory.
-      const existingRows = await queryRows(db, 'SELECT student_id FROM scholars');
-      const existingIds = new Set(existingRows.map((r: any) => String(r.student_id).toUpperCase()));
-      const seenInThisBatch = new Set<string>();
-      const insertStatements: { sql: string; args: any[] }[] = [];
 
       for (let i = 0; i < list.length; i++) {
         const item = list[i];
@@ -790,12 +784,13 @@ async function startServer() {
           continue;
         }
 
-        if (existingIds.has(rawStudentId) || seenInThisBatch.has(rawStudentId)) {
+        // Check if student_id already exists
+        const existing = queryRows(db, 'SELECT id FROM scholars WHERE student_id = ?', [rawStudentId]);
+        if (existing.length > 0) {
           skippedCount++;
           errors.push(`Row ${i + 1} (${rawStudentId}): Already registered`);
           continue;
         }
-        seenInThisBatch.add(rawStudentId);
 
         const id = 'sch-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 6);
         const qrCode = generateQrCode(rawStudentId);
@@ -811,10 +806,10 @@ async function startServer() {
         ).toString().trim().toLowerCase();
         const schAwardee = ['yes', 'y', 'true', '1'].includes(rawAwardee) ? 'yes' : 'no';
 
-        insertStatements.push({
-          sql: `INSERT INTO scholars (id, student_id, name, last_name, first_name, middle_initial, year_level, academic_program, year_program, college, scholarship_category, scholarship_subcategory, scholarship_type, email, qr_code, gawad_isko_awardee, gawad_isko_certificate_claimed, created_at)
+        db.run(
+          `INSERT INTO scholars (id, student_id, name, last_name, first_name, middle_initial, year_level, academic_program, year_program, college, scholarship_category, scholarship_subcategory, scholarship_type, email, qr_code, gawad_isko_awardee, gawad_isko_certificate_claimed, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'no', ?)`,
-          args: [
+          [
             id,
             rawStudentId,
             formattedName,
@@ -832,15 +827,12 @@ async function startServer() {
             qrCode,
             schAwardee,
             createdAt,
-          ],
-        });
+          ]
+        );
         addedCount++;
       }
 
-      if (insertStatements.length > 0) {
-        await db.batch(insertStatements, 'write');
-      }
-
+      saveDb();
       broadcastChange('scholars', { addedCount });
 
       res.json({
@@ -856,7 +848,7 @@ async function startServer() {
     }
   });
 
-  app.put('/api/scholars/:id', async (req, res) => {
+  app.put('/api/scholars/:id', (req, res) => {
     try {
       const { id } = req.params;
       const {
@@ -882,14 +874,14 @@ async function startServer() {
         });
       }
 
-      const existing = (await queryRows(db, 'SELECT * FROM scholars WHERE id = ?', [id]))[0];
+      const existing = queryRows(db, 'SELECT * FROM scholars WHERE id = ?', [id])[0];
       if (!existing) {
         return res.status(404).json({ error: 'Scholar not found' });
       }
 
       // Check for duplicate student ID if changing ID
       if (formattedStudentId && formattedStudentId !== existing.student_id) {
-        const dup = await queryRows(db, 'SELECT id FROM scholars WHERE student_id = ? AND id != ?', [formattedStudentId, id]);
+        const dup = queryRows(db, 'SELECT id FROM scholars WHERE student_id = ? AND id != ?', [formattedStudentId, id]);
         if (dup.length > 0) {
           return res.status(409).json({ error: `Scholar with Student ID ${formattedStudentId} already exists.` });
         }
@@ -971,7 +963,7 @@ async function startServer() {
         }
       }
 
-      await db.run(
+      db.run(
         `UPDATE scholars
          SET student_id = ?, name = ?, last_name = ?, first_name = ?, middle_initial = ?, year_level = ?, academic_program = ?, year_program = ?, college = ?, scholarship_category = ?, scholarship_subcategory = ?, scholarship_type = ?, email = ?, gawad_isko_awardee = ?, gawad_isko_certificate_claimed = ?, gawad_isko_certificate_received_at = ?
          WHERE id = ?`,
@@ -998,24 +990,24 @@ async function startServer() {
 
       // Keep attendance student_id in sync with updated scholar student ID
       if (updatedStudentId) {
-        await db.run('UPDATE attendance SET student_id = ? WHERE scholar_id = ?', [updatedStudentId, id]);
+        db.run('UPDATE attendance SET student_id = ? WHERE scholar_id = ?', [updatedStudentId, id]);
       }
 
       saveDb();
       broadcastChange('scholars', { id });
 
-      const updated = (await queryRows(db, 'SELECT * FROM scholars WHERE id = ?', [id]))[0];
+      const updated = queryRows(db, 'SELECT * FROM scholars WHERE id = ?', [id])[0];
       res.json(updated);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.delete('/api/scholars/:id', async (req, res) => {
+  app.delete('/api/scholars/:id', (req, res) => {
     try {
       const { id } = req.params;
-      await db.run('DELETE FROM attendance WHERE scholar_id = ?', [id]);
-      await db.run('DELETE FROM scholars WHERE id = ?', [id]);
+      db.run('DELETE FROM attendance WHERE scholar_id = ?', [id]);
+      db.run('DELETE FROM scholars WHERE id = ?', [id]);
       saveDb();
       broadcastChange('scholars', { id });
       res.json({ success: true, message: 'Scholar and related attendance deleted' });
@@ -1025,14 +1017,14 @@ async function startServer() {
   });
 
   // Dedicated endpoint to update Gawad Isko certificate status
-  app.patch('/api/scholars/:id/certificate', async (req, res) => {
+  app.patch('/api/scholars/:id/certificate', (req, res) => {
     try {
       const { id } = req.params;
       const { claimed } = req.body;
       const isClaimed = String(claimed || '').toLowerCase() === 'yes' || claimed === true ? 'yes' : 'no';
       const receivedAt = isClaimed === 'yes' ? new Date().toISOString() : null;
 
-      await db.run(
+      db.run(
         `UPDATE scholars
          SET gawad_isko_certificate_claimed = ?, gawad_isko_certificate_received_at = ?
          WHERE id = ?`,
@@ -1041,7 +1033,7 @@ async function startServer() {
       saveDb();
       broadcastChange('scholars', { id, action: 'certificate_update' });
 
-      const updated = (await queryRows(db, 'SELECT * FROM scholars WHERE id = ?', [id]))[0];
+      const updated = queryRows(db, 'SELECT * FROM scholars WHERE id = ?', [id])[0];
       if (!updated) {
         return res.status(404).json({ error: 'Scholar not found' });
       }
@@ -1052,13 +1044,13 @@ async function startServer() {
   });
 
   // Dedicated endpoint to toggle Gawad Isko Awardee status
-  app.patch('/api/scholars/:id/gawad-isko', async (req, res) => {
+  app.patch('/api/scholars/:id/gawad-isko', (req, res) => {
     try {
       const { id } = req.params;
       const { gawad_isko_awardee } = req.body;
       const isAwardee = String(gawad_isko_awardee || '').toLowerCase() === 'yes' || gawad_isko_awardee === true ? 'yes' : 'no';
 
-      await db.run(
+      db.run(
         `UPDATE scholars
          SET gawad_isko_awardee = ?
          WHERE id = ?`,
@@ -1067,7 +1059,7 @@ async function startServer() {
       saveDb();
       broadcastChange('scholars', { id, action: 'gawad_isko_update' });
 
-      const updated = (await queryRows(db, 'SELECT * FROM scholars WHERE id = ?', [id]))[0];
+      const updated = queryRows(db, 'SELECT * FROM scholars WHERE id = ?', [id])[0];
       if (!updated) {
         return res.status(404).json({ error: 'Scholar not found' });
       }
@@ -1077,7 +1069,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/scholars/batch-delete', async (req, res) => {
+  app.post('/api/scholars/batch-delete', (req, res) => {
     try {
       const { ids } = req.body;
       if (!Array.isArray(ids) || ids.length === 0) {
@@ -1085,8 +1077,8 @@ async function startServer() {
       }
 
       for (const id of ids) {
-        await db.run('DELETE FROM attendance WHERE scholar_id = ?', [id]);
-        await db.run('DELETE FROM scholars WHERE id = ?', [id]);
+        db.run('DELETE FROM attendance WHERE scholar_id = ?', [id]);
+        db.run('DELETE FROM scholars WHERE id = ?', [id]);
       }
       saveDb();
       broadcastChange('scholars', { count: ids.length });
@@ -1097,16 +1089,16 @@ async function startServer() {
   });
 
   // 4.1. Email Templates & Batch Emailing
-  app.get('/api/email-templates', async (req, res) => {
+  app.get('/api/email-templates', (req, res) => {
     try {
-      const templates = await queryRows(db, 'SELECT * FROM email_templates ORDER BY created_at DESC;');
+      const templates = queryRows(db, 'SELECT * FROM email_templates ORDER BY created_at DESC;');
       res.json(templates);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.post('/api/email-templates', async (req, res) => {
+  app.post('/api/email-templates', (req, res) => {
     try {
       const { name, subject, body } = req.body;
       if (!name || !subject || !body) {
@@ -1116,26 +1108,26 @@ async function startServer() {
       const id = 'tmpl-' + Date.now().toString(36);
       const createdAt = new Date().toISOString();
 
-      await db.run(
+      db.run(
         `INSERT INTO email_templates (id, name, subject, body, created_at)
          VALUES (?, ?, ?, ?, ?)`,
         [id, name.trim(), subject.trim(), body.trim(), createdAt]
       );
       saveDb();
 
-      const created = (await queryRows(db, 'SELECT * FROM email_templates WHERE id = ?', [id]))[0];
+      const created = queryRows(db, 'SELECT * FROM email_templates WHERE id = ?', [id])[0];
       res.status(201).json(created);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.put('/api/email-templates/:id', async (req, res) => {
+  app.put('/api/email-templates/:id', (req, res) => {
     try {
       const { id } = req.params;
       const { name, subject, body } = req.body;
 
-      await db.run(
+      db.run(
         `UPDATE email_templates
          SET name = ?, subject = ?, body = ?
          WHERE id = ?`,
@@ -1143,17 +1135,17 @@ async function startServer() {
       );
       saveDb();
 
-      const updated = (await queryRows(db, 'SELECT * FROM email_templates WHERE id = ?', [id]))[0];
+      const updated = queryRows(db, 'SELECT * FROM email_templates WHERE id = ?', [id])[0];
       res.json(updated);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.delete('/api/email-templates/:id', async (req, res) => {
+  app.delete('/api/email-templates/:id', (req, res) => {
     try {
       const { id } = req.params;
-      await db.run('DELETE FROM email_templates WHERE id = ?', [id]);
+      db.run('DELETE FROM email_templates WHERE id = ?', [id]);
       saveDb();
       res.json({ success: true, message: 'Template deleted' });
     } catch (err: any) {
@@ -1161,7 +1153,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/scholars/batch-email', async (req, res) => {
+  app.post('/api/scholars/batch-email', (req, res) => {
     try {
       const { subject, body, scholar_ids, sender_name = 'MIDSA Attendance Office' } = req.body;
 
@@ -1172,13 +1164,13 @@ async function startServer() {
       let scholarsToEmail: any[] = [];
       if (Array.isArray(scholar_ids) && scholar_ids.length > 0) {
         const placeholders = scholar_ids.map(() => '?').join(',');
-        scholarsToEmail = await queryRows(
+        scholarsToEmail = queryRows(
           db,
           `SELECT * FROM scholars WHERE id IN (${placeholders}) ORDER BY name ASC`,
           scholar_ids
         );
       } else {
-        scholarsToEmail = await queryRows(db, 'SELECT * FROM scholars ORDER BY name ASC');
+        scholarsToEmail = queryRows(db, 'SELECT * FROM scholars ORDER BY name ASC');
       }
 
       if (scholarsToEmail.length === 0) {
@@ -1215,7 +1207,7 @@ async function startServer() {
         sample_recipient: dispatchedList[0]?.email,
       });
 
-      await db.run(
+      db.run(
         `INSERT INTO email_campaigns (id, subject, recipient_count, sent_at, status, details)
          VALUES (?, ?, ?, ?, ?, ?)`,
         [campaignId, subject, dispatchedList.length, sentAt, 'Completed', details]
@@ -1237,9 +1229,9 @@ async function startServer() {
     }
   });
 
-  app.get('/api/email-campaigns', async (req, res) => {
+  app.get('/api/email-campaigns', (req, res) => {
     try {
-      const campaigns = await queryRows(db, 'SELECT * FROM email_campaigns ORDER BY sent_at DESC LIMIT 20;');
+      const campaigns = queryRows(db, 'SELECT * FROM email_campaigns ORDER BY sent_at DESC LIMIT 20;');
       res.json(campaigns);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1247,7 +1239,7 @@ async function startServer() {
   });
 
   // 5. Attendance Endpoints
-  app.get('/api/attendance', async (req, res) => {
+  app.get('/api/attendance', (req, res) => {
     try {
       const { event_id } = req.query;
       let sql = `
@@ -1267,7 +1259,7 @@ async function startServer() {
       }
       sql += ' ORDER BY COALESCE(a.sign_out_time, a.sign_in_time, a.timestamp) DESC;';
 
-      const list = await queryRows(db, sql, params);
+      const list = queryRows(db, sql, params);
       res.json(list);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1277,7 +1269,7 @@ async function startServer() {
   // Check-in or Sign-out via QR code or Student ID
   // 1st scan/entry for single event = Sign In
   // 2nd scan/entry for existing sign-in record = Sign Out
-  app.post('/api/attendance/check-in', async (req, res) => {
+  app.post('/api/attendance/check-in', (req, res) => {
     try {
       const { event_id, qr_code, student_id, check_in_method = 'QR Scanner', status = 'Present', notes = '' } = req.body;
 
@@ -1286,7 +1278,7 @@ async function startServer() {
       }
 
       // Verify event exists
-      const eventRows = await queryRows(db, 'SELECT * FROM events WHERE id = ?', [event_id]);
+      const eventRows = queryRows(db, 'SELECT * FROM events WHERE id = ?', [event_id]);
       if (eventRows.length === 0) {
         return res.status(404).json({ error: 'Selected event does not exist' });
       }
@@ -1308,17 +1300,17 @@ async function startServer() {
       let scholarRows: any[] = [];
       if (qr_code) {
         const cleanQr = qr_code.trim();
-        scholarRows = await queryRows(db, 'SELECT * FROM scholars WHERE qr_code = ? OR student_id = ?', [cleanQr, cleanQr]);
+        scholarRows = queryRows(db, 'SELECT * FROM scholars WHERE qr_code = ? OR student_id = ?', [cleanQr, cleanQr]);
         // Also support if QR code contains raw JSON or student_id prefix
         if (scholarRows.length === 0 && cleanQr.includes('MIDSA-SCHOLAR-')) {
           const parts = cleanQr.split('-');
           if (parts.length >= 3) {
             const possibleId = parts.slice(2, parts.length - 1).join('-');
-            scholarRows = await queryRows(db, 'SELECT * FROM scholars WHERE student_id = ?', [possibleId]);
+            scholarRows = queryRows(db, 'SELECT * FROM scholars WHERE student_id = ?', [possibleId]);
           }
         }
       } else if (student_id) {
-        scholarRows = await queryRows(db, 'SELECT * FROM scholars WHERE student_id = ?', [student_id.trim()]);
+        scholarRows = queryRows(db, 'SELECT * FROM scholars WHERE student_id = ?', [student_id.trim()]);
       }
 
       if (scholarRows.length === 0) {
@@ -1331,7 +1323,7 @@ async function startServer() {
       const scholar = scholarRows[0];
 
       // Check for existing attendance record for this scholar at this event
-      const existingAtt = await queryRows(
+      const existingAtt = queryRows(
         db,
         'SELECT * FROM attendance WHERE event_id = ? AND scholar_id = ?',
         [event_id, scholar.id]
@@ -1346,7 +1338,7 @@ async function startServer() {
           const signOutTimestamp = new Date().toISOString();
           const signOutMethod = check_in_method || 'QR Scanner';
 
-          await db.run(
+          db.run(
             `UPDATE attendance
              SET sign_out_time = ?, sign_out_method = ?
              WHERE id = ?`,
@@ -1355,7 +1347,7 @@ async function startServer() {
           saveDb();
           broadcastChange('attendance', { eventId: event_id, scholarId: scholar.id, action: 'sign_out' });
 
-          const updatedRecord = (await queryRows(
+          const updatedRecord = queryRows(
             db,
             `SELECT a.id, a.event_id, a.scholar_id, s.student_id as student_id, a.timestamp,
                     COALESCE(a.sign_in_time, a.timestamp) as sign_in_time, a.sign_out_time, a.status,
@@ -1367,7 +1359,7 @@ async function startServer() {
              JOIN events e ON a.event_id = e.id
              WHERE a.id = ?`,
             [existingRecord.id]
-          ))[0];
+          )[0];
 
           return res.status(200).json({
             success: true,
@@ -1381,7 +1373,7 @@ async function startServer() {
         }
 
         // If sign_out_time IS already recorded, attendance is already complete
-        const completedRecord = (await queryRows(
+        const completedRecord = queryRows(
           db,
           `SELECT a.id, a.event_id, a.scholar_id, s.student_id as student_id, a.timestamp,
                   COALESCE(a.sign_in_time, a.timestamp) as sign_in_time, a.sign_out_time, a.status,
@@ -1393,7 +1385,7 @@ async function startServer() {
            JOIN events e ON a.event_id = e.id
            WHERE a.id = ?`,
           [existingRecord.id]
-        ))[0] || existingRecord;
+        )[0] || existingRecord;
 
         return res.status(200).json({
           success: false,
@@ -1413,7 +1405,7 @@ async function startServer() {
       const timestamp = new Date().toISOString();
       const signInTime = timestamp;
 
-      await db.run(
+      db.run(
         `INSERT INTO attendance (id, event_id, scholar_id, student_id, timestamp, sign_in_time, sign_out_time, status, check_in_method, sign_out_method, notes)
          VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?)`,
         [attId, event_id, scholar.id, scholar.student_id, timestamp, signInTime, status, check_in_method, notes]
@@ -1421,7 +1413,7 @@ async function startServer() {
       saveDb();
       broadcastChange('attendance', { eventId: event_id, scholarId: scholar.id, action: 'sign_in' });
 
-      const newRecord = (await queryRows(
+      const newRecord = queryRows(
         db,
         `SELECT a.id, a.event_id, a.scholar_id, s.student_id as student_id, a.timestamp,
                 COALESCE(a.sign_in_time, a.timestamp) as sign_in_time, a.sign_out_time, a.status,
@@ -1433,7 +1425,7 @@ async function startServer() {
          JOIN events e ON a.event_id = e.id
          WHERE a.id = ?`,
         [attId]
-      ))[0];
+      )[0];
 
       res.status(201).json({
         success: true,
@@ -1451,13 +1443,13 @@ async function startServer() {
   });
 
   // Explicit Sign-out Endpoint (e.g. for one-click sign out in roster)
-  app.post('/api/attendance/:id/sign-out', async (req, res) => {
+  app.post('/api/attendance/:id/sign-out', (req, res) => {
     try {
       const { id } = req.params;
       const { sign_out_method = 'Manual Entry' } = req.body;
       const signOutTimestamp = new Date().toISOString();
 
-      await db.run(
+      db.run(
         `UPDATE attendance
          SET sign_out_time = ?, sign_out_method = ?
          WHERE id = ?`,
@@ -1466,7 +1458,7 @@ async function startServer() {
       saveDb();
       broadcastChange('attendance', { id, action: 'sign_out' });
 
-      const updated = (await queryRows(
+      const updated = queryRows(
         db,
         `SELECT a.id, a.event_id, a.scholar_id, s.student_id as student_id, a.timestamp,
                 COALESCE(a.sign_in_time, a.timestamp) as sign_in_time, a.sign_out_time, a.status,
@@ -1478,9 +1470,9 @@ async function startServer() {
          JOIN events e ON a.event_id = e.id
          WHERE a.id = ?`,
         [id]
-      ))[0];
+      )[0];
 
-      const scholarObj = (await queryRows(db, 'SELECT * FROM scholars WHERE id = ?', [updated.scholar_id]))[0];
+      const scholarObj = queryRows(db, 'SELECT * FROM scholars WHERE id = ?', [updated.scholar_id])[0];
 
       res.json({
         success: true,
@@ -1494,10 +1486,10 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/attendance/:id', async (req, res) => {
+  app.delete('/api/attendance/:id', (req, res) => {
     try {
       const { id } = req.params;
-      await db.run('DELETE FROM attendance WHERE id = ?', [id]);
+      db.run('DELETE FROM attendance WHERE id = ?', [id]);
       saveDb();
       broadcastChange('attendance', { id });
       res.json({ success: true, message: 'Attendance record deleted' });
@@ -1506,7 +1498,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/attendance/batch-delete', async (req, res) => {
+  app.post('/api/attendance/batch-delete', (req, res) => {
     try {
       const { ids } = req.body;
       if (!Array.isArray(ids) || ids.length === 0) {
@@ -1514,7 +1506,7 @@ async function startServer() {
       }
 
       for (const id of ids) {
-        await db.run('DELETE FROM attendance WHERE id = ?', [id]);
+        db.run('DELETE FROM attendance WHERE id = ?', [id]);
       }
       saveDb();
       broadcastChange('attendance', { count: ids.length });
@@ -1534,7 +1526,7 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', async (req, res) => {
+    app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

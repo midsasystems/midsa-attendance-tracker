@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Scholar, EmailTemplate } from '../types';
 import { api } from '../services/api';
 import {
@@ -12,13 +12,22 @@ import {
   Users,
   ShieldCheck,
   ChevronDown,
+  Paperclip,
+  Upload,
 } from 'lucide-react';
 import {
   subscribeAuth,
   getCurrentUser,
   getAccessToken,
 } from '../services/googleAuth';
-import { sendBatchScholarEmailPasses, SendResult } from '../services/gmail';
+import {
+  sendBatchScholarEmailPasses,
+  SendResult,
+  EmailAttachment,
+  fileToEmailAttachment,
+  formatFileSize,
+  MAX_TOTAL_ATTACHMENT_BYTES,
+} from '../services/gmail';
 import { formatScholarName, personalizeEmailTemplate } from '../utils/formatters';
 import { GoogleAuthButton } from './GoogleAuthButton';
 import { User } from 'firebase/auth';
@@ -61,8 +70,14 @@ export const SelectTemplateModal: React.FC<SelectTemplateModalProps> = ({
     total: number;
     success: number;
     failed: number;
+    failedResults: SendResult[];
   } | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // File Attachments
+  const [attachments, setAttachments] = useState<EmailAttachment[]>([]);
+  const [isReadingAttachments, setIsReadingAttachments] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     const unsub = subscribeAuth((state) => {
@@ -80,6 +95,7 @@ export const SelectTemplateModal: React.FC<SelectTemplateModalProps> = ({
       setIsSending(false);
       setSendProgress(0);
       setCurrentProgressText('');
+      setAttachments([]);
       loadTemplates();
     }
   }, [isOpen]);
@@ -116,6 +132,40 @@ export const SelectTemplateModal: React.FC<SelectTemplateModalProps> = ({
     ? personalizeEmailTemplate(activeTemplate.body, primaryScholar)
     : '';
 
+  const handleFilesSelected = async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    setErrorMessage(null);
+    setIsReadingAttachments(true);
+
+    try {
+      const incomingFiles = Array.from(fileList);
+      const currentTotal = attachments.reduce((sum, a) => sum + a.size, 0);
+      const incomingTotal = incomingFiles.reduce((sum, f) => sum + f.size, 0);
+
+      if (currentTotal + incomingTotal > MAX_TOTAL_ATTACHMENT_BYTES) {
+        setErrorMessage(
+          `Total attachment size cannot exceed ${formatFileSize(MAX_TOTAL_ATTACHMENT_BYTES)}.`
+        );
+        return;
+      }
+
+      const converted = await Promise.all(incomingFiles.map((f) => fileToEmailAttachment(f)));
+      setAttachments((prev) => [...prev, ...converted]);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to read selected file(s).');
+    } finally {
+      setIsReadingAttachments(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleRemoveAttachment = (id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+    setErrorMessage(null);
+  };
+
   const handleSend = async () => {
     if (!currentUser || !accessToken) {
       setErrorMessage('Please connect your Google Workspace account with Gmail permissions.');
@@ -139,6 +189,7 @@ export const SelectTemplateModal: React.FC<SelectTemplateModalProps> = ({
           subject: activeTemplate.subject,
           body: activeTemplate.body,
           senderName: 'MIDSA Attendance Office',
+          attachments,
         },
         (current, total, lastResult) => {
           setSendProgress(Math.round((current / total) * 100));
@@ -150,16 +201,17 @@ export const SelectTemplateModal: React.FC<SelectTemplateModalProps> = ({
         }
       );
 
-      const successfulCount = results.filter((r) => r.success).length;
-      const failedCount = results.length - successfulCount;
+      const failedResults = results.filter((r) => !r.success);
+      const successfulCount = results.length - failedResults.length;
 
       setSendResults({
         total: results.length,
         success: successfulCount,
-        failed: failedCount,
+        failed: failedResults.length,
+        failedResults,
       });
 
-      if (onSuccess) {
+      if (successfulCount > 0 && onSuccess) {
         onSuccess();
       }
     } catch (err: any) {
@@ -209,16 +261,34 @@ export const SelectTemplateModal: React.FC<SelectTemplateModalProps> = ({
 
         {/* Modal Body */}
         <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto">
-          {/* Success state */}
+          {/* Result summary state */}
           {sendResults ? (
             <div className="py-4 text-center space-y-3">
-              <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto shadow-sm">
-                <CheckCircle2 className="w-6 h-6" />
-              </div>
+              {sendResults.success === 0 ? (
+                <div className="w-12 h-12 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto shadow-sm">
+                  <AlertCircle className="w-6 h-6" />
+                </div>
+              ) : sendResults.failed > 0 ? (
+                <div className="w-12 h-12 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center mx-auto shadow-sm">
+                  <AlertCircle className="w-6 h-6" />
+                </div>
+              ) : (
+                <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto shadow-sm">
+                  <CheckCircle2 className="w-6 h-6" />
+                </div>
+              )}
+
               <div>
-                <h4 className="font-bold text-slate-900 text-base">Emails Successfully Dispatched</h4>
+                <h4 className="font-bold text-slate-900 text-base">
+                  {sendResults.success === 0
+                    ? 'Email Dispatch Failed'
+                    : sendResults.failed > 0
+                    ? 'Partially Dispatched'
+                    : 'Emails Successfully Dispatched'}
+                </h4>
                 <p className="text-xs text-slate-600 mt-1">
-                  Sent {sendResults.success} of {sendResults.total} QR passes directly to student inboxes via Gmail.
+                  Sent {sendResults.success} of {sendResults.total} QR pass
+                  {sendResults.total > 1 ? 'es' : ''} directly to student inboxes via Gmail.
                 </p>
                 {sendResults.failed > 0 && (
                   <p className="text-xs text-rose-600 font-semibold mt-1">
@@ -226,12 +296,44 @@ export const SelectTemplateModal: React.FC<SelectTemplateModalProps> = ({
                   </p>
                 )}
               </div>
-              <div className="pt-2">
+
+              {sendResults.failedResults.length > 0 && (
+                <div className="text-left p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-[11px] space-y-1.5 max-h-40 overflow-y-auto">
+                  <p className="font-bold text-rose-900">Delivery Error Details:</p>
+                  {sendResults.failedResults.map((f) => (
+                    <div key={f.scholarId} className="font-mono break-words bg-white/70 p-2 rounded-lg border border-rose-200/70">
+                      <span className="font-bold">{f.email || f.studentId}:</span>{' '}
+                      <span>{f.error || 'Unknown Gmail API error'}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {sendResults.failed > 0 && (!currentUser || !accessToken) && (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-left text-xs space-y-2">
+                  <p className="text-[11px] text-amber-800 font-medium">
+                    Reconnect your Google account below, then click Try Again:
+                  </p>
+                  <GoogleAuthButton compact />
+                </div>
+              )}
+
+              <div className="pt-2 flex items-center gap-2">
+                {sendResults.failed > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setSendResults(null)}
+                    className="flex-1 py-2.5 px-4 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-100 text-xs font-bold transition-all cursor-pointer"
+                  >
+                    Try Again
+                  </button>
+                )}
                 <button
+                  type="button"
                   onClick={onClose}
-                  className="w-full py-2.5 px-4 rounded-xl bg-[#004ACD] hover:bg-[#0165CB] text-white text-xs font-bold shadow-md shadow-blue-500/20 transition-all cursor-pointer"
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-[#004ACD] hover:bg-[#0165CB] text-white text-xs font-bold shadow-md shadow-blue-500/20 transition-all cursor-pointer"
                 >
-                  Done
+                  {sendResults.failed === 0 ? 'Done' : 'Close'}
                 </button>
               </div>
             </div>
@@ -317,6 +419,79 @@ export const SelectTemplateModal: React.FC<SelectTemplateModalProps> = ({
                   </div>
                 </div>
               )}
+
+              {/* File Attachments (Optional) */}
+              <div className="border border-slate-200 rounded-xl p-3 bg-slate-50/70 text-xs space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center space-x-1.5 text-slate-700 font-bold">
+                    <Paperclip className="w-3.5 h-3.5 text-[#004ACD] shrink-0" />
+                    <span>Attach Files (Optional)</span>
+                  </div>
+
+                  <div>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      onChange={(e) => handleFilesSelected(e.target.files)}
+                      className="hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isReadingAttachments || isSending}
+                      className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-white border border-[#004ACD]/40 hover:bg-blue-50 text-[#004ACD] text-[11px] font-bold transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      {isReadingAttachments ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Upload className="w-3 h-3" />
+                      )}
+                      <span>{isReadingAttachments ? 'Reading...' : 'Choose Files'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {attachments.length === 0 ? (
+                  <p className="text-[11px] text-slate-400">
+                    Add PDFs, images, or documents to send along with the QR pass (max {formatFileSize(MAX_TOTAL_ATTACHMENT_BYTES)}).
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-[10px] text-slate-500">
+                      <span>{attachments.length} file{attachments.length > 1 ? 's' : ''} attached</span>
+                      <span>
+                        {formatFileSize(attachments.reduce((s, a) => s + a.size, 0))} / {formatFileSize(MAX_TOTAL_ATTACHMENT_BYTES)}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {attachments.map((att) => (
+                        <div
+                          key={att.id}
+                          className="flex items-center space-x-1.5 px-2 py-1 rounded-lg bg-white border border-slate-200 text-[11px] max-w-full"
+                        >
+                          <Paperclip className="w-3 h-3 text-[#004ACD] shrink-0" />
+                          <span className="font-semibold text-slate-700 truncate max-w-[140px]" title={att.name}>
+                            {att.name}
+                          </span>
+                          <span className="text-[10px] text-slate-400 shrink-0">
+                            ({formatFileSize(att.size)})
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveAttachment(att.id)}
+                            disabled={isSending}
+                            title="Remove file"
+                            className="text-slate-400 hover:text-rose-600 p-0.5 rounded cursor-pointer disabled:opacity-50 shrink-0"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
 
               {/* Google Account Connection Status */}
               <div>

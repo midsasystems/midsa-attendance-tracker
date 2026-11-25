@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Scholar, EmailTemplate } from '../types';
 import { api } from '../services/api';
 import { QRCodeSVG } from 'qrcode.react';
@@ -21,6 +21,8 @@ import {
   RefreshCw,
   AlertTriangle,
   Trash2,
+  Paperclip,
+  Upload,
 } from 'lucide-react';
 import {
   subscribeAuth,
@@ -28,7 +30,14 @@ import {
   getCurrentUser,
   getAccessToken,
 } from '../services/googleAuth';
-import { sendBatchScholarEmailPasses, SendResult } from '../services/gmail';
+import {
+  sendBatchScholarEmailPasses,
+  SendResult,
+  EmailAttachment,
+  fileToEmailAttachment,
+  formatFileSize,
+  MAX_TOTAL_ATTACHMENT_BYTES,
+} from '../services/gmail';
 import { ConfirmEmailDispatchModal } from './ConfirmEmailDispatchModal';
 import { ConfirmModal } from './ConfirmModal';
 import {
@@ -77,6 +86,7 @@ export const BatchEmailModal: React.FC<BatchEmailModalProps> = ({
   const [sendProgress, setSendProgress] = useState(0);
   const [currentSendingStatus, setCurrentSendingStatus] = useState<string>('');
   const [batchResults, setBatchResults] = useState<SendResult[] | null>(null);
+  const [dispatchError, setDispatchError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
   // Delete Template Confirmation Dialog
@@ -86,6 +96,12 @@ export const BatchEmailModal: React.FC<BatchEmailModalProps> = ({
 
   // Confirmation dialog
   const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false);
+
+  // File Attachments
+  const [attachments, setAttachments] = useState<EmailAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [isReadingAttachments, setIsReadingAttachments] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Colleges for filtering
   const colleges = Array.from(
@@ -110,8 +126,11 @@ export const BatchEmailModal: React.FC<BatchEmailModalProps> = ({
     if (isOpen) {
       loadTemplates();
       setBatchResults(null);
+      setDispatchError(null);
       setSendProgress(0);
       setCurrentSendingStatus('');
+      setAttachments([]);
+      setAttachmentError(null);
     }
   }, [isOpen]);
 
@@ -198,7 +217,7 @@ export const BatchEmailModal: React.FC<BatchEmailModalProps> = ({
       setTimeout(() => setSaveSuccess(false), 2000);
       loadTemplates();
     } catch (err: any) {
-      alert('Failed to save template: ' + err.message);
+      setDeleteError('Failed to save template: ' + err.message);
     }
   };
 
@@ -214,15 +233,49 @@ export const BatchEmailModal: React.FC<BatchEmailModalProps> = ({
     return personalizeEmailTemplate(text, scholar);
   };
 
+  const handleFilesSelected = async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    setAttachmentError(null);
+    setIsReadingAttachments(true);
+
+    try {
+      const incomingFiles = Array.from(fileList);
+      const currentTotal = attachments.reduce((sum, a) => sum + a.size, 0);
+      const incomingTotal = incomingFiles.reduce((sum, f) => sum + f.size, 0);
+
+      if (currentTotal + incomingTotal > MAX_TOTAL_ATTACHMENT_BYTES) {
+        setAttachmentError(
+          `Total attachment size cannot exceed ${formatFileSize(MAX_TOTAL_ATTACHMENT_BYTES)}.`
+        );
+        return;
+      }
+
+      const converted = await Promise.all(incomingFiles.map((f) => fileToEmailAttachment(f)));
+      setAttachments((prev) => [...prev, ...converted]);
+    } catch (err: any) {
+      setAttachmentError(err.message || 'Failed to attach file(s).');
+    } finally {
+      setIsReadingAttachments(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleRemoveAttachment = (id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+    setAttachmentError(null);
+  };
+
   const handlePromptSend = () => {
+    setDispatchError(null);
     if (targetScholars.length === 0) {
-      alert('No scholars selected to email.');
+      setDispatchError('No scholars selected to email.');
       return;
     }
 
     if (!currentUser || !accessToken) {
-      // Prompt user to connect Google account first
-      alert('Please connect your Google account first using the "Sign in with Google" button above.');
+      setDispatchError('Please connect your Google account first using the "Sign in with Google" button above.');
       return;
     }
 
@@ -233,6 +286,7 @@ export const BatchEmailModal: React.FC<BatchEmailModalProps> = ({
   const handleConfirmedSend = async () => {
     setIsConfirmModalOpen(false);
     setIsSending(true);
+    setDispatchError(null);
     setSendProgress(5);
     setCurrentSendingStatus('Preparing personalized QR passes and attachments...');
     setBatchResults(null);
@@ -244,6 +298,7 @@ export const BatchEmailModal: React.FC<BatchEmailModalProps> = ({
           subject,
           body,
           senderName,
+          attachments,
         },
         (current, total, lastResult) => {
           const pct = Math.round((current / total) * 100);
@@ -257,18 +312,21 @@ export const BatchEmailModal: React.FC<BatchEmailModalProps> = ({
       setBatchResults(results);
       setSendProgress(100);
 
-      // Also record the campaign to the SQLite database
-      const scholarIds = targetScholars.map((s) => s.id);
-      await api.sendBatchEmail({
-        subject,
-        body,
-        sender_name: senderName,
-        scholar_ids: scholarIds,
-      }).catch((err) => console.warn('Local SQLite campaign log error:', err));
+      const anySucceeded = results.some((r) => r.success);
+      if (anySucceeded) {
+        // Record the campaign to the SQLite database
+        const scholarIds = results.filter((r) => r.success).map((r) => r.scholarId);
+        await api.sendBatchEmail({
+          subject,
+          body,
+          sender_name: senderName,
+          scholar_ids: scholarIds,
+        }).catch((err) => console.warn('Local SQLite campaign log error:', err));
 
-      onSuccess();
+        onSuccess();
+      }
     } catch (err: any) {
-      alert('Failed to dispatch emails: ' + err.message);
+      setDispatchError('Failed to dispatch emails: ' + (err.message || 'Unknown error'));
     } finally {
       setIsSending(false);
     }
@@ -506,6 +564,94 @@ export const BatchEmailModal: React.FC<BatchEmailModalProps> = ({
                   />
                 </div>
 
+                {/* File Attachments Section */}
+                <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center space-x-2">
+                      <Paperclip className="w-4 h-4 text-[#004ACD]" />
+                      <div>
+                        <span className="text-xs font-bold text-slate-700 block">
+                          File Attachments (Optional)
+                        </span>
+                        <span className="text-[11px] text-slate-500">
+                          Attach PDFs, flyers, letters, or documents alongside each scholar&apos;s QR pass (max {formatFileSize(MAX_TOTAL_ATTACHMENT_BYTES)} total).
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center space-x-2">
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        multiple
+                        onChange={(e) => handleFilesSelected(e.target.files)}
+                        className="hidden"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={isReadingAttachments || isSending}
+                        className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-white border border-[#004ACD]/40 hover:bg-blue-50 text-[#004ACD] text-xs font-bold shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        {isReadingAttachments ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Upload className="w-3.5 h-3.5" />
+                        )}
+                        <span>{isReadingAttachments ? 'Reading...' : 'Attach Files'}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {attachmentError && (
+                    <div className="p-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-[11px] flex items-center space-x-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span>{attachmentError}</span>
+                    </div>
+                  )}
+
+                  {attachments.length > 0 && (
+                    <div className="space-y-1.5 pt-1">
+                      <div className="flex items-center justify-between text-[11px] text-slate-500 font-medium">
+                        <span>
+                          {attachments.length} file{attachments.length > 1 ? 's' : ''} attached
+                        </span>
+                        <span>
+                          Total:{' '}
+                          <strong className="text-slate-700">
+                            {formatFileSize(attachments.reduce((s, a) => s + a.size, 0))}
+                          </strong>{' '}
+                          / {formatFileSize(MAX_TOTAL_ATTACHMENT_BYTES)}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {attachments.map((att) => (
+                          <div
+                            key={att.id}
+                            className="flex items-center space-x-2 px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 text-xs shadow-2xs max-w-full"
+                          >
+                            <Paperclip className="w-3 h-3 text-[#004ACD] shrink-0" />
+                            <span className="font-semibold text-slate-800 truncate max-w-[180px]" title={att.name}>
+                              {att.name}
+                            </span>
+                            <span className="text-[10px] text-slate-400 font-mono shrink-0">
+                              {formatFileSize(att.size)}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveAttachment(att.id)}
+                              title="Remove attachment"
+                              className="text-slate-400 hover:text-rose-600 p-0.5 rounded transition-colors cursor-pointer shrink-0"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 {/* Template Action Buttons: Delete Template & Save Template */}
                 {deleteError && (
                   <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center space-x-2">
@@ -642,6 +788,28 @@ export const BatchEmailModal: React.FC<BatchEmailModalProps> = ({
                       </div>
                     )}
 
+                    {/* Attached Files Preview */}
+                    {attachments.length > 0 && (
+                      <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
+                        <div className="text-[11px] font-bold text-slate-600 uppercase tracking-wider flex items-center space-x-1.5">
+                          <Paperclip className="w-3.5 h-3.5 text-[#004ACD]" />
+                          <span>Attached Files ({attachments.length})</span>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {attachments.map((att) => (
+                            <div
+                              key={att.id}
+                              className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs text-slate-700"
+                            >
+                              <FileText className="w-3.5 h-3.5 text-[#004ACD] shrink-0" />
+                              <span className="font-medium truncate max-w-[180px]">{att.name}</span>
+                              <span className="text-[10px] text-slate-400">({formatFileSize(att.size)})</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
                     {/* Footer */}
                     <div className="pt-3 border-t border-slate-100 text-center text-[10px] text-slate-400">
                       MSU-IIT DOST-SEI Scholars' Association • Official Digital Attendance Pass
@@ -670,24 +838,58 @@ export const BatchEmailModal: React.FC<BatchEmailModalProps> = ({
               </div>
             )}
 
+            {/* Dispatch Validation / Error Alert */}
+            {dispatchError && (
+              <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center space-x-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span className="font-medium">{dispatchError}</span>
+              </div>
+            )}
+
             {/* Sent Summary / Results */}
             {batchResults && (
-              <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-900 space-y-3">
-                <div className="flex items-center space-x-2 font-bold text-sm text-emerald-800">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+              <div
+                className={`p-4 rounded-xl text-xs space-y-3 border ${
+                  successfulSends === 0
+                    ? 'bg-rose-50 border-rose-200 text-rose-900'
+                    : failedSends.length > 0
+                    ? 'bg-amber-50 border-amber-200 text-amber-900'
+                    : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                }`}
+              >
+                <div
+                  className={`flex items-center space-x-2 font-bold text-sm ${
+                    successfulSends === 0
+                      ? 'text-rose-800'
+                      : failedSends.length > 0
+                      ? 'text-amber-800'
+                      : 'text-emerald-800'
+                  }`}
+                >
+                  {successfulSends === 0 ? (
+                    <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
+                  ) : failedSends.length > 0 ? (
+                    <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+                  ) : (
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                  )}
                   <span>
-                    Dispatched {successfulSends} of {batchResults.length} real email pass{batchResults.length > 1 ? 'es' : ''} via Gmail!
+                    {successfulSends === 0
+                      ? `Failed to dispatch ${failedSends.length} email${failedSends.length > 1 ? 's' : ''} via Gmail`
+                      : `Dispatched ${successfulSends} of ${batchResults.length} real email pass${batchResults.length > 1 ? 'es' : ''} via Gmail!`}
                   </span>
                 </div>
-                <p className="text-emerald-700">
-                  Emails were transmitted directly from <strong className="font-mono">{currentUser?.email}</strong> with attached QR passes.
-                </p>
+                {successfulSends > 0 && (
+                  <p className={failedSends.length > 0 ? 'text-amber-700' : 'text-emerald-700'}>
+                    Emails were transmitted directly from <strong className="font-mono">{currentUser?.email}</strong> with attached QR passes.
+                  </p>
+                )}
 
                 {failedSends.length > 0 && (
-                  <div className="mt-2 p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-[11px] space-y-1">
+                  <div className="mt-2 p-2.5 rounded-lg bg-white/80 border border-rose-200 text-rose-800 text-[11px] space-y-1 max-h-40 overflow-y-auto">
                     <p className="font-bold">Notice: {failedSends.length} email(s) encountered delivery errors:</p>
                     {failedSends.map((f) => (
-                      <p key={f.scholarId} className="font-mono">
+                      <p key={f.scholarId} className="font-mono break-words">
                         • {f.email}: {f.error}
                       </p>
                     ))}
@@ -747,6 +949,7 @@ export const BatchEmailModal: React.FC<BatchEmailModalProps> = ({
         senderEmail={currentUser?.email || ''}
         senderName={senderName}
         subject={renderPersonalized(subject, targetScholars[0])}
+        attachments={attachments}
         isSending={isSending}
       />
 
