@@ -1,6 +1,7 @@
 import QRCode from 'qrcode';
 import { Scholar } from '../types';
 import { getAccessToken, getCurrentUser, invalidateAccessToken } from './googleAuth';
+import { getAuthToken } from './api';
 import { formatScholarName, personalizeEmailTemplate } from '../utils/formatters';
 
 export interface EmailAttachment {
@@ -367,9 +368,10 @@ export async function sendScholarEmailPass(options: SendEmailOptions): Promise<S
       senderEmail: effectiveSenderEmail,
     });
 
-    // For payloads under 3 MB, use standard JSON raw endpoint; for larger attachments use Gmail media upload
+    // For payloads under 2 MB, use standard JSON raw endpoint; for larger attachments route through same-origin /api/gmail/send
     let response: Response;
-    if (rawMime.length < 3 * 1024 * 1024) {
+    let viaProxy = false;
+    if (rawMime.length < 2 * 1024 * 1024) {
       const base64UrlMessage = encodeBase64Url(rawMime);
       response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
         method: 'POST',
@@ -382,27 +384,36 @@ export async function sendScholarEmailPass(options: SendEmailOptions): Promise<S
         }),
       });
     } else {
-      response = await fetch(
-        'https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media',
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'message/rfc822',
-          },
-          body: rawMime,
-        }
-      );
+      viaProxy = true;
+      const headers: Record<string, string> = {
+        'Content-Type': 'message/rfc822',
+        'X-Google-Access-Token': token,
+      };
+      const adminToken = getAuthToken();
+      if (adminToken) {
+        headers['Authorization'] = `Bearer ${adminToken}`;
+      }
+      response = await fetch('/api/gmail/send', {
+        method: 'POST',
+        headers,
+        body: rawMime,
+      });
     }
 
     if (!response.ok) {
       const errJson = await response.json().catch(() => null);
-      const apiMsg = errJson?.error?.message || `Gmail API Error (${response.status})`;
+      const apiMsg =
+        errJson?.error?.message ||
+        (typeof errJson?.error === 'string' ? errJson.error : null) ||
+        `Gmail API Error (${response.status})`;
       if (response.status === 401) {
-        invalidateAccessToken();
-        throw new Error(
-          'Your Google authorization token expired or is invalid (401). Please click "Sign in with Google" to reconnect.'
-        );
+        if (!viaProxy || errJson?.source === 'gmail') {
+          invalidateAccessToken();
+          throw new Error(
+            'Your Google authorization token expired or is invalid (401). Please click "Sign in with Google" to reconnect.'
+          );
+        }
+        throw new Error(apiMsg);
       }
       if (response.status === 403) {
         throw new Error(
@@ -412,13 +423,13 @@ export async function sendScholarEmailPass(options: SendEmailOptions): Promise<S
       throw new Error(apiMsg);
     }
 
-    const data = await response.json();
+    const data = await response.json().catch(() => null);
     return {
       scholarId: options.scholar.id,
       studentId: options.scholar.student_id,
       email: options.scholar.email,
       success: true,
-      messageId: data.id,
+      messageId: data?.id,
     };
   } catch (error: any) {
     return {

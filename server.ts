@@ -1229,6 +1229,74 @@ async function startServer() {
     }
   });
 
+  // Proxy for Gmail API media upload (avoids browser CORS issues on UploadServer POST responses)
+  app.post(
+    '/api/gmail/send',
+    express.raw({ type: 'message/rfc822', limit: '25mb' }),
+    async (req, res) => {
+      try {
+        const googleToken = req.header('X-Google-Access-Token')?.trim();
+        if (!googleToken) {
+          return res.status(401).json({
+            source: 'gmail',
+            error: {
+              code: 401,
+              message: 'Missing Google OAuth access token. Please sign in with Google.',
+            },
+          });
+        }
+
+        if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+          return res.status(400).json({
+            source: 'gmail',
+            error: {
+              code: 400,
+              message: 'Empty RFC 2822 email payload.',
+            },
+          });
+        }
+
+        const gmailResponse = await fetch(
+          'https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media',
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${googleToken}`,
+              'Content-Type': 'message/rfc822',
+            },
+            body: req.body.toString('utf8'),
+          }
+        );
+
+        const rawText = await gmailResponse.text();
+        let parsed: any = null;
+        try {
+          parsed = rawText ? JSON.parse(rawText) : {};
+        } catch {
+          parsed = { rawText };
+        }
+
+        if (!gmailResponse.ok) {
+          return res.status(gmailResponse.status).json({
+            source: 'gmail',
+            ...(typeof parsed === 'object' && parsed !== null ? parsed : { message: rawText }),
+          });
+        }
+
+        return res.status(gmailResponse.status).json(parsed ?? { ok: true });
+      } catch (err: any) {
+        console.error('Gmail proxy error:', err);
+        return res.status(502).json({
+          source: 'gmail',
+          error: {
+            code: 502,
+            message: err?.message || 'Failed to relay email to Gmail API.',
+          },
+        });
+      }
+    }
+  );
+
   app.get('/api/email-campaigns', (req, res) => {
     try {
       const campaigns = queryRows(db, 'SELECT * FROM email_campaigns ORDER BY sent_at DESC LIMIT 20;');
